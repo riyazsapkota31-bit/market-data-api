@@ -2,7 +2,7 @@ name: Fetch Market Data (Hybrid)
 
 on:
   schedule:
-    - cron: '*/2 * * * *'      # Every 2 minutes
+    - cron: '*/2 * * * *'
   workflow_dispatch:
 
 jobs:
