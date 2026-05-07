@@ -1,15 +1,19 @@
-// fetch-prices.js – Binance (corrected symbols) + Finnhub DXY
+// fetch-prices.js – Hybrid: Binance (commodities) + Twelve Data (forex) + CoinGecko (crypto) + Finnhub (DXY)
 const fs = require('fs');
 const path = require('path');
 
+// API keys from GitHub Secrets
+const TWELVE_KEY = process.env.TWELVE_DATA_KEY;
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
-if (!FINNHUB_KEY) console.warn('⚠️ FINNHUB_API_KEY missing – DXY will be skipped');
+
+if (!TWELVE_KEY) console.warn('⚠️ Missing TWELVE_DATA_KEY – forex will be skipped');
+if (!FINNHUB_KEY) console.warn('⚠️ Missing FINNHUB_API_KEY – DXY will be skipped');
 
 const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
 
-// Helper: fetch with timeout
-async function fetchJSON(url, timeout = 5000) {
+// ---------- Helper: fetch with timeout ----------
+async function fetchJSON(url, timeout = 8000) {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
     try {
@@ -23,50 +27,79 @@ async function fetchJSON(url, timeout = 5000) {
     }
 }
 
-// Helper: write output or error file
-function writeResult(file, data, error = null) {
+// ---------- Write file (with error placeholder) ----------
+function writeFile(file, data, error = null) {
     const output = error ? { error: error.message, timestamp: new Date().toISOString() } : data;
     fs.writeFileSync(path.join(dataDir, `${file}.json`), JSON.stringify(output, null, 2));
     if (!error) console.log(`✓ ${file} updated`);
     else console.error(`✗ ${file}: ${error.message}`);
 }
 
-// ------------------------------------------------------------
-// 1. Binance Spot (crypto, PAXG for gold/silver)
-// ------------------------------------------------------------
-async function fetchBinanceSpot(symbol, file) {
-    try {
-        const url = `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`;
-        const data = await fetchJSON(url);
-        const price = parseFloat(data.price);
-        if (isNaN(price)) throw new Error('Invalid price');
-        writeResult(file, { price, timestamp: new Date().toISOString(), source: 'Binance Spot' });
-    } catch (err) {
-        writeResult(file, null, err);
-    }
-}
-
-// ------------------------------------------------------------
-// 2. Binance Futures (forex, oil)
-// ------------------------------------------------------------
+// ============================================================
+// 1. Binance Futures – Commodities (Gold, Silver, Oil)
+// ============================================================
 async function fetchBinanceFutures(symbol, file) {
     try {
         const url = `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`;
         const data = await fetchJSON(url);
         const price = parseFloat(data.price);
         if (isNaN(price)) throw new Error('Invalid price');
-        writeResult(file, { price, timestamp: new Date().toISOString(), source: 'Binance Futures' });
+        writeFile(file, { price, timestamp: new Date().toISOString(), source: 'Binance Futures' });
     } catch (err) {
-        writeResult(file, null, err);
+        writeFile(file, null, err);
     }
 }
 
-// ------------------------------------------------------------
-// 3. Finnhub DXY
-// ------------------------------------------------------------
+// ============================================================
+// 2. Twelve Data – Forex (batch quote)
+// ============================================================
+async function fetchTwelveDataForex() {
+    if (!TWELVE_KEY) {
+        writeFile('eurusd', null, new Error('No Twelve Data key'));
+        writeFile('gbpusd', null, new Error('No Twelve Data key'));
+        return;
+    }
+    try {
+        const symbols = 'EUR/USD,GBP/USD';
+        const url = `https://api.twelvedata.com/quote?symbol=${symbols}&apikey=${TWELVE_KEY}`;
+        const data = await fetchJSON(url);
+        for (const [sym, file] of [['EUR/USD','eurusd'], ['GBP/USD','gbpusd']]) {
+            const quote = data[sym];
+            if (quote && quote.close) {
+                const price = parseFloat(quote.close);
+                writeFile(file, { price, open: parseFloat(quote.open), high: parseFloat(quote.high), low: parseFloat(quote.low),
+                    change: parseFloat(quote.percent_change), timestamp: new Date().toISOString(), source: 'Twelve Data' });
+            } else {
+                writeFile(file, null, new Error(`No data for ${sym}`));
+            }
+        }
+    } catch (err) {
+        writeFile('eurusd', null, err);
+        writeFile('gbpusd', null, err);
+    }
+}
+
+// ============================================================
+// 3. CoinGecko – Crypto (no API key)
+// ============================================================
+async function fetchCoinGecko(id, file) {
+    try {
+        const url = `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`;
+        const data = await fetchJSON(url);
+        const price = data[id]?.usd;
+        if (!price) throw new Error('No price');
+        writeFile(file, { price, timestamp: new Date().toISOString(), source: 'CoinGecko' });
+    } catch (err) {
+        writeFile(file, null, err);
+    }
+}
+
+// ============================================================
+// 4. Finnhub – DXY (US Dollar Index)
+// ============================================================
 async function fetchDXY() {
     if (!FINNHUB_KEY) {
-        writeResult('dxy', null, new Error('No FINNHUB_API_KEY'));
+        writeFile('dxy', null, new Error('No Finnhub key'));
         return;
     }
     try {
@@ -74,30 +107,30 @@ async function fetchDXY() {
         const data = await fetchJSON(url);
         const price = data.c;
         if (!price) throw new Error('No price');
-        writeResult('dxy', {
+        writeFile('dxy', {
             price, open: data.o, high: data.h, low: data.l, change: data.dp,
             timestamp: new Date().toISOString(), source: 'Finnhub'
         });
     } catch (err) {
-        writeResult('dxy', null, err);
+        writeFile('dxy', null, err);
     }
 }
 
-// ------------------------------------------------------------
-// Main – run all fetches (each writes its own file)
-// ------------------------------------------------------------
+// ============================================================
+// Main – run all fetches in parallel
+// ============================================================
 async function main() {
-    // Correct symbols:
-    // Spot: BTCUSDT, ETHUSDT, PAXGUSDT (tracks gold)
-    // Futures: EURUSDT, GBPUSDT, CL (WTI Crude Oil)
     await Promise.allSettled([
-        fetchBinanceSpot('BTCUSDT', 'btcusd'),
-        fetchBinanceSpot('ETHUSDT', 'ethusd'),
-        fetchBinanceSpot('PAXGUSDT', 'xauusd'),
-        fetchBinanceSpot('PAXGUSDT', 'xagusd'),   // same token for silver proxy
-        fetchBinanceFutures('EURUSDT', 'eurusd'),
-        fetchBinanceFutures('GBPUSDT', 'gbpusd'),
-        fetchBinanceFutures('CL', 'wtiusd'),      // WTI Crude Oil on Binance Futures
+        // Commodities (Binance Futures)
+        fetchBinanceFutures('XAUUSDT', 'xauusd'),
+        fetchBinanceFutures('XAGUSDT', 'xagusd'),
+        fetchBinanceFutures('CL', 'wtiusd'),          // WTI Crude Oil on Binance Futures
+        // Forex (Twelve Data)
+        fetchTwelveDataForex(),
+        // Crypto (CoinGecko)
+        fetchCoinGecko('bitcoin', 'btcusd'),
+        fetchCoinGecko('ethereum', 'ethusd'),
+        // DXY (Finnhub)
         fetchDXY()
     ]);
     console.log('--- Data update finished ---');
