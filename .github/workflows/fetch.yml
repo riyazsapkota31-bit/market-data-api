@@ -1,4 +1,4 @@
-name: Fetch Market Data (5‑min candles)
+name: Fetch Market Data (Twelve + CoinGecko + Binance)
 
 on:
   repository_dispatch:
@@ -18,8 +18,8 @@ jobs:
       - name: Run data sync
         run: node fetch-prices.js
         env:
-          TWELVE_KEY: ${{ secrets.TWELVE_DATA_KEY }}
-          FINNHUB_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          TWELVE_DATA_KEY: ${{ secrets.TWELVE_DATA_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
