@@ -1,4 +1,4 @@
-name: Fetch Market Data (Binance + Finnhub)
+name: Fetch Market Data
 
 on:
   schedule:
@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Run data sync
+      - name: Fetch prices
         run: node fetch-prices.js
         env:
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
