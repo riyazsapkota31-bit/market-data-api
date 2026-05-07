@@ -1,15 +1,14 @@
-// fetch-prices.js – Binance (all assets) + Finnhub DXY (your key)
+// fetch-prices.js – Binance (corrected symbols) + Finnhub DXY
 const fs = require('fs');
 const path = require('path');
 
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
-if (!FINNHUB_KEY) {
-    console.warn('⚠️ FINNHUB_API_KEY missing – DXY will be skipped');
-}
+if (!FINNHUB_KEY) console.warn('⚠️ FINNHUB_API_KEY missing – DXY will be skipped');
 
 const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
 
+// Helper: fetch with timeout
 async function fetchJSON(url, timeout = 5000) {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
@@ -24,40 +23,50 @@ async function fetchJSON(url, timeout = 5000) {
     }
 }
 
-// ---------- Binance Spot (crypto, gold/silver via PAXG) ----------
+// Helper: write output or error file
+function writeResult(file, data, error = null) {
+    const output = error ? { error: error.message, timestamp: new Date().toISOString() } : data;
+    fs.writeFileSync(path.join(dataDir, `${file}.json`), JSON.stringify(output, null, 2));
+    if (!error) console.log(`✓ ${file} updated`);
+    else console.error(`✗ ${file}: ${error.message}`);
+}
+
+// ------------------------------------------------------------
+// 1. Binance Spot (crypto, PAXG for gold/silver)
+// ------------------------------------------------------------
 async function fetchBinanceSpot(symbol, file) {
     try {
         const url = `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`;
         const data = await fetchJSON(url);
         const price = parseFloat(data.price);
         if (isNaN(price)) throw new Error('Invalid price');
-        const output = { price, timestamp: new Date().toISOString(), source: 'Binance Spot' };
-        fs.writeFileSync(path.join(dataDir, `${file}.json`), JSON.stringify(output, null, 2));
-        console.log(`✓ ${file} from Binance Spot`);
+        writeResult(file, { price, timestamp: new Date().toISOString(), source: 'Binance Spot' });
     } catch (err) {
-        console.error(`✗ ${file}: ${err.message}`);
+        writeResult(file, null, err);
     }
 }
 
-// ---------- Binance Futures (forex, oil) ----------
+// ------------------------------------------------------------
+// 2. Binance Futures (forex, oil)
+// ------------------------------------------------------------
 async function fetchBinanceFutures(symbol, file) {
     try {
         const url = `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`;
         const data = await fetchJSON(url);
         const price = parseFloat(data.price);
         if (isNaN(price)) throw new Error('Invalid price');
-        const output = { price, timestamp: new Date().toISOString(), source: 'Binance Futures' };
-        fs.writeFileSync(path.join(dataDir, `${file}.json`), JSON.stringify(output, null, 2));
-        console.log(`✓ ${file} from Binance Futures`);
+        writeResult(file, { price, timestamp: new Date().toISOString(), source: 'Binance Futures' });
     } catch (err) {
-        console.error(`✗ ${file}: ${err.message}`);
+        writeResult(file, null, err);
     }
 }
 
-// ---------- Finnhub DXY ----------
+// ------------------------------------------------------------
+// 3. Finnhub DXY
+// ------------------------------------------------------------
 async function fetchDXY() {
     if (!FINNHUB_KEY) {
-        console.warn('Skipping DXY – no API key');
+        writeResult('dxy', null, new Error('No FINNHUB_API_KEY'));
         return;
     }
     try {
@@ -65,34 +74,30 @@ async function fetchDXY() {
         const data = await fetchJSON(url);
         const price = data.c;
         if (!price) throw new Error('No price');
-        const output = {
-            price,
-            open: data.o,
-            high: data.h,
-            low: data.l,
-            change: data.dp,
-            timestamp: new Date().toISOString(),
-            source: 'Finnhub'
-        };
-        fs.writeFileSync(path.join(dataDir, 'dxy.json'), JSON.stringify(output, null, 2));
-        console.log('✓ dxy from Finnhub');
+        writeResult('dxy', {
+            price, open: data.o, high: data.h, low: data.l, change: data.dp,
+            timestamp: new Date().toISOString(), source: 'Finnhub'
+        });
     } catch (err) {
-        console.error(`✗ dxy: ${err.message}`);
-        // fallback
-        fs.writeFileSync(path.join(dataDir, 'dxy.json'), JSON.stringify({ price: 0, error: true, timestamp: new Date().toISOString() }, null, 2));
+        writeResult('dxy', null, err);
     }
 }
 
-// ---------- Main ----------
+// ------------------------------------------------------------
+// Main – run all fetches (each writes its own file)
+// ------------------------------------------------------------
 async function main() {
-    await Promise.all([
+    // Correct symbols:
+    // Spot: BTCUSDT, ETHUSDT, PAXGUSDT (tracks gold)
+    // Futures: EURUSDT, GBPUSDT, CL (WTI Crude Oil)
+    await Promise.allSettled([
         fetchBinanceSpot('BTCUSDT', 'btcusd'),
         fetchBinanceSpot('ETHUSDT', 'ethusd'),
         fetchBinanceSpot('PAXGUSDT', 'xauusd'),
-        fetchBinanceSpot('PAXGUSDT', 'xagusd'),
+        fetchBinanceSpot('PAXGUSDT', 'xagusd'),   // same token for silver proxy
         fetchBinanceFutures('EURUSDT', 'eurusd'),
         fetchBinanceFutures('GBPUSDT', 'gbpusd'),
-        fetchBinanceFutures('CLUSDT', 'wtiusd'),
+        fetchBinanceFutures('CL', 'wtiusd'),      // WTI Crude Oil on Binance Futures
         fetchDXY()
     ]);
     console.log('--- Data update finished ---');
