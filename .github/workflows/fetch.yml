@@ -1,8 +1,8 @@
-name: Fetch Market Data
+name: Fetch Market Data (Hybrid)
 
 on:
   schedule:
-    - cron: '*/2 * * * *'
+    - cron: '*/2 * * * *'      # Every 2 minutes
   workflow_dispatch:
 
 jobs:
@@ -15,9 +15,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Fetch prices
+      - name: Run data sync
         run: node fetch-prices.js
         env:
+          TWELVE_DATA_KEY: ${{ secrets.TWELVE_DATA_KEY }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
       - name: Commit and push
         run: |
