@@ -1,4 +1,4 @@
-// fetch-prices.js – fixed symbols + detailed error logging
+// fetch-prices.js – Forex: Twelve Data | Crypto: CoinGecko | Commodities: Binance Futures | DXY: Finnhub
 const fs = require('fs');
 const path = require('path');
 
@@ -22,56 +22,53 @@ async function fetchJSON(url, timeout = 10000) {
     }
 }
 
-function writeError(file, err) {
-    const output = { error: err.message, timestamp: new Date().toISOString() };
+function writeFile(file, data, error = null) {
+    const output = error ? { error: error.message, timestamp: new Date().toISOString() } : data;
     fs.writeFileSync(path.join(dataDir, `${file}.json`), JSON.stringify(output, null, 2));
-    console.error(`✗ ${file}: ${err.message}`);
-}
-
-function writeSuccess(file, data) {
-    fs.writeFileSync(path.join(dataDir, `${file}.json`), JSON.stringify(data, null, 2));
-    console.log(`✓ ${file} updated`);
+    if (!error) console.log(`✓ ${file} updated`);
+    else console.error(`✗ ${file}: ${error.message}`);
 }
 
 // ------------------------------------------------------------
-// Binance Futures – commodities (5‑min candles)
+// 1. Binance Futures – Commodities (5‑min candles, 100 points)
 // ------------------------------------------------------------
-async function fetchBinanceFuturesKlines(symbol, file) {
+async function fetchBinanceFutures(symbol, file) {
     try {
         const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=100`;
         const klines = await fetchJSON(url);
         const closes = klines.map(k => parseFloat(k[4]));
-        if (!closes.length) throw new Error('No klines data');
+        if (!closes.length) throw new Error('No klines');
         const currentPrice = closes[closes.length - 1];
-        writeSuccess(file, { currentPrice, history: closes, timestamp: new Date().toISOString(), source: 'Binance Futures' });
+        writeFile(file, { currentPrice, history: closes, timestamp: new Date().toISOString(), source: 'Binance Futures (5m)' });
     } catch (err) {
-        writeError(file, err);
+        writeFile(file, null, err);
     }
 }
 
 // ------------------------------------------------------------
-// Binance Spot – crypto (5‑min candles)
+// 2. CoinGecko – Crypto (daily candles, 100 days)
 // ------------------------------------------------------------
-async function fetchBinanceSpotKlines(symbol, file) {
+async function fetchCoinGecko(id, file) {
     try {
-        const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=5m&limit=100`;
-        const klines = await fetchJSON(url);
-        const closes = klines.map(k => parseFloat(k[4]));
-        if (!closes.length) throw new Error('No klines data');
+        const url = `https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=100&interval=daily`;
+        const data = await fetchJSON(url);
+        const prices = data.prices;
+        if (!prices || prices.length === 0) throw new Error('No price data');
+        const closes = prices.map(p => p[1]); // second element is price
         const currentPrice = closes[closes.length - 1];
-        writeSuccess(file, { currentPrice, history: closes, timestamp: new Date().toISOString(), source: 'Binance Spot' });
+        writeFile(file, { currentPrice, history: closes, timestamp: new Date().toISOString(), source: 'CoinGecko (daily)' });
     } catch (err) {
-        writeError(file, err);
+        writeFile(file, null, err);
     }
 }
 
 // ------------------------------------------------------------
-// Twelve Data – forex (daily candles – more reliable on free tier)
+// 3. Twelve Data – Forex (daily candles, 100 points – reliable on free tier)
 // ------------------------------------------------------------
 async function fetchTwelveDataForex() {
     if (!TWELVE_KEY) {
-        writeError('eurusd', new Error('No Twelve Data key'));
-        writeError('gbpusd', new Error('No Twelve Data key'));
+        writeFile('eurusd', null, new Error('No Twelve Data key'));
+        writeFile('gbpusd', null, new Error('No Twelve Data key'));
         return;
     }
     const pairs = [
@@ -80,25 +77,24 @@ async function fetchTwelveDataForex() {
     ];
     for (const pair of pairs) {
         try {
-            // Use daily candles (free tier works better)
             const url = `https://api.twelvedata.com/time_series?symbol=${pair.symbol}&interval=1day&outputsize=100&apikey=${TWELVE_KEY}`;
             const data = await fetchJSON(url);
             if (!data.values || data.values.length === 0) throw new Error('No data');
             const closes = data.values.map(v => parseFloat(v.close));
             const currentPrice = closes[0];
-            writeSuccess(pair.file, { currentPrice, history: closes, timestamp: new Date().toISOString(), source: 'Twelve Data (1d)' });
+            writeFile(pair.file, { currentPrice, history: closes, timestamp: new Date().toISOString(), source: 'Twelve Data (1d)' });
         } catch (err) {
-            writeError(pair.file, err);
+            writeFile(pair.file, null, err);
         }
     }
 }
 
 // ------------------------------------------------------------
-// Finnhub DXY
+// 4. Finnhub – DXY (current price only, enough for filter)
 // ------------------------------------------------------------
 async function fetchDXY() {
     if (!FINNHUB_KEY) {
-        writeError('dxy', new Error('No Finnhub key'));
+        writeFile('dxy', null, new Error('No Finnhub key'));
         return;
     }
     try {
@@ -106,23 +102,23 @@ async function fetchDXY() {
         const data = await fetchJSON(url);
         const price = data.c;
         if (!price) throw new Error('No price');
-        writeSuccess('dxy', { currentPrice: price, history: [price], timestamp: new Date().toISOString(), source: 'Finnhub' });
+        writeFile('dxy', { currentPrice: price, history: [price], timestamp: new Date().toISOString(), source: 'Finnhub' });
     } catch (err) {
-        writeError('dxy', err);
+        writeFile('dxy', null, err);
     }
 }
 
 // ------------------------------------------------------------
-// Main – run all fetches
+// Main – parallel execution
 // ------------------------------------------------------------
 async function main() {
     console.log('--- Starting data sync ---');
     await Promise.allSettled([
-        fetchBinanceFuturesKlines('XAUUSDT', 'xauusd'),
-        fetchBinanceFuturesKlines('XAGUSDT', 'xagusd'),
-        fetchBinanceFuturesKlines('CLUSDT', 'wtiusd'),   // Fixed oil symbol
-        fetchBinanceSpotKlines('BTCUSDT', 'btcusd'),
-        fetchBinanceSpotKlines('ETHUSDT', 'ethusd'),
+        fetchBinanceFutures('XAUUSDT', 'xauusd'),
+        fetchBinanceFutures('XAGUSDT', 'xagusd'),
+        fetchBinanceFutures('CLUSDT', 'wtiusd'),   // WTI Oil
+        fetchCoinGecko('bitcoin', 'btcusd'),
+        fetchCoinGecko('ethereum', 'ethusd'),
         fetchTwelveDataForex(),
         fetchDXY()
     ]);
