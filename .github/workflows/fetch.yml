@@ -1,8 +1,8 @@
-name: Fetch Market Data (Twelve + CoinGecko + Binance)
+name: Fetch Market Data (5 min)
 
 on:
-  repository_dispatch:
-    types: [cron-job]
+  schedule:
+    - cron: '*/5 * * * *'   # every 5 minutes
   workflow_dispatch:
 
 jobs:
@@ -19,7 +19,6 @@ jobs:
         run: node fetch-prices.js
         env:
           TWELVE_DATA_KEY: ${{ secrets.TWELVE_DATA_KEY }}
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
