@@ -1,17 +1,21 @@
-// fetch-prices.js – Multi‑source data fetcher
-// Sources:
-//   Forex (EUR/USD, GBP/USD) → Frankfurter (daily rates, free, no key)
-//   Gold, Silver → Gramvey (current price, free, no key)
-//   WTI Oil → CommodityPriceAPI (current price, free demo, no key)
-//   Crypto (BTC, ETH) → CoinGecko (5‑min OHLCV candles, free, no key)
-//   DXY → Twelve Data (5‑min candles, requires free API key)
+// fetch-prices.js – v4.0 (Final)
+// Builds 5‑minute candles for all assets.
+// Runs every minute (triggered by cron-job.org via repository_dispatch).
+// Forex: built from Frankfurter minute snapshots (no key)
+// DXY, Oil: Twelve Data (requires API key) – fetched every 5 minutes
+// Crypto, Gold, Silver: Binance (no key) – fetched every 5 minutes
+// All assets maintain rolling 100‑candle history.
+
 const fs = require('fs');
 const path = require('path');
 
-const TWELVE_KEY = process.env.TWELVE_DATA_KEY;   // required only for DXY
+const TWELVE_KEY = process.env.TWELVE_DATA_KEY;
 const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
 
+// ------------------------------------------------------------------
+// Helper functions
+// ------------------------------------------------------------------
 async function fetchJSON(url, timeout = 10000) {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
@@ -29,132 +33,186 @@ async function fetchJSON(url, timeout = 10000) {
 function writeFile(file, data, error = null) {
     const output = error ? { error: error.message, timestamp: Date.now() } : data;
     fs.writeFileSync(path.join(dataDir, `${file}.json`), JSON.stringify(output, null, 2));
-    if (!error) console.log(`✓ ${file} updated`);
+    if (!error) console.log(`✓ ${file} updated (${data.history?.length || 0} candles)`);
     else console.error(`✗ ${file}: ${error.message}`);
 }
 
-// ------------------------------------------------------------
-// 1. Forex – Frankfurter (daily rates, free, no key)
-// Returns current price (latest rate). History will be built by frontend.
-// ------------------------------------------------------------
-async function fetchForexFrankfurter(base, file) {
-    try {
-        // Get the latest rate (today's rate)
-        const url = `https://api.frankfurter.dev/v1/latest?base=${base}`;
-        const data = await fetchJSON(url);
-        const target = file === 'eurusd' ? 'USD' : 'USD';
-        const price = data.rates?.[target];
-        if (!price) throw new Error(`No rate for ${base}/${target}`);
-        writeFile(file, {
-            currentPrice: price,
-            timestamp: Date.now(),
-            source: 'Frankfurter'
-        });
-    } catch (err) {
-        writeFile(file, null, err);
+// ------------------------------------------------------------------
+// Forex: Build 5‑minute candles from minute snapshots (Frankfurter, no key)
+// ------------------------------------------------------------------
+const FOREX_PAIRS = [
+    { name: 'eurusd', base: 'EUR', quote: 'USD' },
+    { name: 'gbpusd', base: 'GBP', quote: 'USD' }
+];
+
+function loadCandleState(file) {
+    const stateFile = path.join(dataDir, `${file}_candle.json`);
+    if (fs.existsSync(stateFile)) {
+        try { return JSON.parse(fs.readFileSync(stateFile)); } catch(e) { return null; }
+    }
+    return null;
+}
+
+function saveCandleState(file, state) {
+    const stateFile = path.join(dataDir, `${file}_candle.json`);
+    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+}
+
+function appendCandleToHistory(file, candle) {
+    const historyFile = path.join(dataDir, `${file}.json`);
+    let history = { history: [] };
+    if (fs.existsSync(historyFile)) {
+        try { history = JSON.parse(fs.readFileSync(historyFile)); } catch(e) {}
+    }
+    if (!history.history) history.history = [];
+    history.history.unshift(candle.close); // newest first
+    if (history.history.length > 100) history.history.pop();
+    history.currentPrice = candle.close;
+    history.timestamp = Date.now();
+    history.source = 'Frankfurter (built 5min)';
+    fs.writeFileSync(historyFile, JSON.stringify(history, null, 2));
+}
+
+async function processForex() {
+    for (const pair of FOREX_PAIRS) {
+        try {
+            const url = `https://api.frankfurter.app/latest?from=${pair.base}&to=${pair.quote}`;
+            const data = await fetchJSON(url);
+            const price = data.rates[pair.quote];
+            if (!price) throw new Error('No price');
+
+            const now = Date.now();
+            const minute = Math.floor(now / 60000);
+            const current5minBucket = Math.floor(minute / 5);
+
+            let state = loadCandleState(pair.name);
+            if (!state || state.bucket !== current5minBucket) {
+                // Finalize previous candle if exists
+                if (state && state.candle) {
+                    const completedCandle = {
+                        open: state.candle.open,
+                        high: state.candle.high,
+                        low: state.candle.low,
+                        close: state.lastPrice,
+                        timestamp: state.startTime
+                    };
+                    appendCandleToHistory(pair.name, completedCandle);
+                }
+                // Start new candle
+                state = {
+                    bucket: current5minBucket,
+                    startTime: now,
+                    candle: { open: price, high: price, low: price, close: price },
+                    lastPrice: price,
+                    lastTimestamp: now
+                };
+            } else {
+                // Update current candle
+                state.candle.high = Math.max(state.candle.high, price);
+                state.candle.low = Math.min(state.candle.low, price);
+                state.candle.close = price;
+                state.lastPrice = price;
+                state.lastTimestamp = now;
+            }
+            saveCandleState(pair.name, state);
+            console.log(`✓ Forex ${pair.name} price ${price}`);
+        } catch (err) {
+            console.error(`✗ Forex ${pair.name}: ${err.message}`);
+        }
     }
 }
 
-// ------------------------------------------------------------
-// 2. Gold & Silver – Gramvey (current price only, free, no key)
-// ------------------------------------------------------------
-async function fetchGramvey(symbol, file) {
-    try {
-        const url = `https://goldapi.gramvey.com/golds/${symbol}/?currency=USD`;
-        const data = await fetchJSON(url);
-        const price = data.price;
-        if (!price) throw new Error('No price');
-        writeFile(file, {
-            currentPrice: price,
-            timestamp: Date.now(),
-            source: 'Gramvey'
-        });
-    } catch (err) {
-        writeFile(file, null, err);
-    }
-}
+// ------------------------------------------------------------------
+// Full fetch for other assets (run every 5 minutes)
+// ------------------------------------------------------------------
+let lastFullFetch = 0;
+const FULL_FETCH_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
-// ------------------------------------------------------------
-// 3. WTI Oil – CommodityPriceAPI (current price, free demo, no key)
-// ------------------------------------------------------------
-async function fetchOil() {
-    try {
-        const url = 'https://commoditypriceapi.com/api/latest?commodity=crude_oil&apikey=demo';
-        const data = await fetchJSON(url);
-        const price = data.rates?.USD;
-        if (!price) throw new Error('No oil price');
-        writeFile('wtiusd', {
-            currentPrice: price,
-            timestamp: Date.now(),
-            source: 'CommodityPriceAPI'
-        });
-    } catch (err) {
-        writeFile('wtiusd', null, err);
-    }
-}
-
-// ------------------------------------------------------------
-// 4. Crypto – CoinGecko (5‑minute OHLCV candles, provides history array)
-// ------------------------------------------------------------
-async function fetchCrypto(id, file) {
-    try {
-        const url = `https://api.coingecko.com/api/v3/coins/${id}/ohlc?vs_currency=usd&days=7&interval=5minute`;
-        const data = await fetchJSON(url);
-        if (!data || data.length === 0) throw new Error('No data');
-        const closes = data.map(c => c[4]); // close price
-        const currentPrice = closes[0];
-        writeFile(file, {
-            currentPrice,
-            history: closes,
-            timestamp: Date.now(),
-            source: 'CoinGecko (5min)'
-        });
-    } catch (err) {
-        writeFile(file, null, err);
-    }
-}
-
-// ------------------------------------------------------------
-// 5. DXY – Twelve Data (5‑minute candles, requires API key)
-// ------------------------------------------------------------
-async function fetchDXY() {
+// Twelve Data assets (DXY, oil)
+async function fetchTwelveData(symbol, file, interval = '5min') {
     if (!TWELVE_KEY) {
-        writeFile('dxy', null, new Error('No Twelve Data key'));
+        writeFile(file, null, new Error('No Twelve Data key'));
         return;
     }
     try {
-        const url = `https://api.twelvedata.com/time_series?symbol=DXY&interval=5min&outputsize=100&apikey=${TWELVE_KEY}`;
+        const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=100&apikey=${TWELVE_KEY}`;
         const data = await fetchJSON(url);
         if (!data.values || data.values.length === 0) throw new Error('No data');
-        const closes = data.values.map(v => parseFloat(v.close));
-        const currentPrice = closes[0];
-        writeFile('dxy', {
-            currentPrice,
-            history: closes,
-            timestamp: Date.now(),
-            source: 'Twelve Data (5min)'
-        });
+        const history = data.values.map(v => parseFloat(v.close));
+        const currentPrice = history[0];
+        writeFile(file, { currentPrice, history, timestamp: Date.now(), source: `Twelve Data (${interval})` });
     } catch (err) {
-        writeFile('dxy', null, err);
+        writeFile(file, null, err);
     }
 }
 
-// ------------------------------------------------------------
-// Main
-// ------------------------------------------------------------
-async function main() {
-    console.log('--- Fetching market data ---');
+// Binance Spot (crypto)
+async function fetchBinanceSpot(symbol, file) {
+    try {
+        const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=5m&limit=100`;
+        const data = await fetchJSON(url);
+        if (!data || data.length === 0) throw new Error('No data');
+        const history = data.map(candle => parseFloat(candle[4]));
+        const currentPrice = history[0];
+        writeFile(file, { currentPrice, history, timestamp: Date.now(), source: 'Binance Spot (5min)' });
+    } catch (err) {
+        writeFile(file, null, err);
+    }
+}
+
+// Binance Futures (gold, silver)
+async function fetchBinanceFutures(symbol, file) {
+    try {
+        const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=100`;
+        const data = await fetchJSON(url);
+        if (!data || data.length === 0) throw new Error('No data');
+        const history = data.map(candle => parseFloat(candle[4]));
+        const currentPrice = history[0];
+        writeFile(file, { currentPrice, history, timestamp: Date.now(), source: 'Binance Futures (5min)' });
+    } catch (err) {
+        writeFile(file, null, err);
+    }
+}
+
+async function fullFetch() {
+    console.log('--- Full fetch (5min candles) for DXY, oil, crypto, metals ---');
     await Promise.allSettled([
-        fetchForexFrankfurter('EUR', 'eurusd'),
-        fetchForexFrankfurter('GBP', 'gbpusd'),
-        fetchGramvey('XAUUSD', 'xauusd'),
-        fetchGramvey('XAGUSD', 'xagusd'),
-        fetchOil(),
-        fetchCrypto('bitcoin', 'btcusd'),
-        fetchCrypto('ethereum', 'ethusd'),
-        fetchDXY()
+        fetchTwelveData('DXY', 'dxy'),
+        fetchTwelveData('WTI', 'wtiusd'),
+        fetchBinanceSpot('BTCUSDT', 'btcusd'),
+        fetchBinanceSpot('ETHUSDT', 'ethusd'),
+        fetchBinanceFutures('XAUUSDT', 'xauusd'),
+        fetchBinanceFutures('XAGUSDT', 'xagusd')
     ]);
-    console.log('--- Data sync finished ---');
+    console.log('--- Full fetch finished ---');
+}
+
+// ------------------------------------------------------------------
+// Main – decides when to run full fetch
+// ------------------------------------------------------------------
+async function main() {
+    console.log('--- Sync started ---');
+    // Always process forex (minute snapshots)
+    await processForex();
+
+    // Read last full fetch time from file
+    const lastFetchFile = path.join(dataDir, '.last_full_fetch');
+    let now = Date.now();
+    if (fs.existsSync(lastFetchFile)) {
+        lastFullFetch = parseInt(fs.readFileSync(lastFetchFile, 'utf8'));
+    } else {
+        lastFullFetch = 0;
+    }
+
+    if (now - lastFullFetch >= FULL_FETCH_INTERVAL) {
+        await fullFetch();
+        lastFullFetch = now;
+        fs.writeFileSync(lastFetchFile, lastFullFetch.toString());
+    } else {
+        const remaining = Math.round((FULL_FETCH_INTERVAL - (now - lastFullFetch)) / 1000);
+        console.log(`Skipping full fetch (next in ${remaining} seconds)`);
+    }
+    console.log('--- Sync finished ---');
 }
 
 main().catch(err => console.error('Fatal error:', err));
