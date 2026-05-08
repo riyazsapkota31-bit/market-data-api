@@ -1,10 +1,14 @@
-// fetch-prices.js – Forex: Twelve Data | Crypto: CoinGecko | Commodities: Binance Futures | DXY: Finnhub
+// fetch-prices.js – Multi‑source data fetcher
+// Sources:
+//   Forex (EUR/USD, GBP/USD) → Frankfurter (daily rates, free, no key)
+//   Gold, Silver → Gramvey (current price, free, no key)
+//   WTI Oil → CommodityPriceAPI (current price, free demo, no key)
+//   Crypto (BTC, ETH) → CoinGecko (5‑min OHLCV candles, free, no key)
+//   DXY → Twelve Data (5‑min candles, requires free API key)
 const fs = require('fs');
 const path = require('path');
 
-const TWELVE_KEY = process.env.TWELVE_DATA_KEY;
-const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
-
+const TWELVE_KEY = process.env.TWELVE_DATA_KEY;   // required only for DXY
 const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
 
@@ -23,103 +27,131 @@ async function fetchJSON(url, timeout = 10000) {
 }
 
 function writeFile(file, data, error = null) {
-    const output = error ? { error: error.message, timestamp: new Date().toISOString() } : data;
+    const output = error ? { error: error.message, timestamp: Date.now() } : data;
     fs.writeFileSync(path.join(dataDir, `${file}.json`), JSON.stringify(output, null, 2));
     if (!error) console.log(`✓ ${file} updated`);
     else console.error(`✗ ${file}: ${error.message}`);
 }
 
 // ------------------------------------------------------------
-// 1. Binance Futures – Commodities (5‑min candles, 100 points)
+// 1. Forex – Frankfurter (daily rates, free, no key)
+// Returns current price (latest rate). History will be built by frontend.
 // ------------------------------------------------------------
-async function fetchBinanceFutures(symbol, file) {
+async function fetchForexFrankfurter(base, file) {
     try {
-        const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=100`;
-        const klines = await fetchJSON(url);
-        const closes = klines.map(k => parseFloat(k[4]));
-        if (!closes.length) throw new Error('No klines');
-        const currentPrice = closes[closes.length - 1];
-        writeFile(file, { currentPrice, history: closes, timestamp: new Date().toISOString(), source: 'Binance Futures (5m)' });
-    } catch (err) {
-        writeFile(file, null, err);
-    }
-}
-
-// ------------------------------------------------------------
-// 2. CoinGecko – Crypto (daily candles, 100 days)
-// ------------------------------------------------------------
-async function fetchCoinGecko(id, file) {
-    try {
-        const url = `https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=100&interval=daily`;
+        // Get the latest rate (today's rate)
+        const url = `https://api.frankfurter.dev/v1/latest?base=${base}`;
         const data = await fetchJSON(url);
-        const prices = data.prices;
-        if (!prices || prices.length === 0) throw new Error('No price data');
-        const closes = prices.map(p => p[1]); // second element is price
-        const currentPrice = closes[closes.length - 1];
-        writeFile(file, { currentPrice, history: closes, timestamp: new Date().toISOString(), source: 'CoinGecko (daily)' });
+        const target = file === 'eurusd' ? 'USD' : 'USD';
+        const price = data.rates?.[target];
+        if (!price) throw new Error(`No rate for ${base}/${target}`);
+        writeFile(file, {
+            currentPrice: price,
+            timestamp: Date.now(),
+            source: 'Frankfurter'
+        });
     } catch (err) {
         writeFile(file, null, err);
     }
 }
 
 // ------------------------------------------------------------
-// 3. Twelve Data – Forex (daily candles, 100 points – reliable on free tier)
+// 2. Gold & Silver – Gramvey (current price only, free, no key)
 // ------------------------------------------------------------
-async function fetchTwelveDataForex() {
-    if (!TWELVE_KEY) {
-        writeFile('eurusd', null, new Error('No Twelve Data key'));
-        writeFile('gbpusd', null, new Error('No Twelve Data key'));
-        return;
-    }
-    const pairs = [
-        { symbol: 'EUR/USD', file: 'eurusd' },
-        { symbol: 'GBP/USD', file: 'gbpusd' }
-    ];
-    for (const pair of pairs) {
-        try {
-            const url = `https://api.twelvedata.com/time_series?symbol=${pair.symbol}&interval=1day&outputsize=100&apikey=${TWELVE_KEY}`;
-            const data = await fetchJSON(url);
-            if (!data.values || data.values.length === 0) throw new Error('No data');
-            const closes = data.values.map(v => parseFloat(v.close));
-            const currentPrice = closes[0];
-            writeFile(pair.file, { currentPrice, history: closes, timestamp: new Date().toISOString(), source: 'Twelve Data (1d)' });
-        } catch (err) {
-            writeFile(pair.file, null, err);
-        }
+async function fetchGramvey(symbol, file) {
+    try {
+        const url = `https://goldapi.gramvey.com/golds/${symbol}/?currency=USD`;
+        const data = await fetchJSON(url);
+        const price = data.price;
+        if (!price) throw new Error('No price');
+        writeFile(file, {
+            currentPrice: price,
+            timestamp: Date.now(),
+            source: 'Gramvey'
+        });
+    } catch (err) {
+        writeFile(file, null, err);
     }
 }
 
 // ------------------------------------------------------------
-// 4. Finnhub – DXY (current price only, enough for filter)
+// 3. WTI Oil – CommodityPriceAPI (current price, free demo, no key)
+// ------------------------------------------------------------
+async function fetchOil() {
+    try {
+        const url = 'https://commoditypriceapi.com/api/latest?commodity=crude_oil&apikey=demo';
+        const data = await fetchJSON(url);
+        const price = data.rates?.USD;
+        if (!price) throw new Error('No oil price');
+        writeFile('wtiusd', {
+            currentPrice: price,
+            timestamp: Date.now(),
+            source: 'CommodityPriceAPI'
+        });
+    } catch (err) {
+        writeFile('wtiusd', null, err);
+    }
+}
+
+// ------------------------------------------------------------
+// 4. Crypto – CoinGecko (5‑minute OHLCV candles, provides history array)
+// ------------------------------------------------------------
+async function fetchCrypto(id, file) {
+    try {
+        const url = `https://api.coingecko.com/api/v3/coins/${id}/ohlc?vs_currency=usd&days=7&interval=5minute`;
+        const data = await fetchJSON(url);
+        if (!data || data.length === 0) throw new Error('No data');
+        const closes = data.map(c => c[4]); // close price
+        const currentPrice = closes[0];
+        writeFile(file, {
+            currentPrice,
+            history: closes,
+            timestamp: Date.now(),
+            source: 'CoinGecko (5min)'
+        });
+    } catch (err) {
+        writeFile(file, null, err);
+    }
+}
+
+// ------------------------------------------------------------
+// 5. DXY – Twelve Data (5‑minute candles, requires API key)
 // ------------------------------------------------------------
 async function fetchDXY() {
-    if (!FINNHUB_KEY) {
-        writeFile('dxy', null, new Error('No Finnhub key'));
+    if (!TWELVE_KEY) {
+        writeFile('dxy', null, new Error('No Twelve Data key'));
         return;
     }
     try {
-        const url = `https://finnhub.io/api/v1/quote?symbol=DX-Y.NYB&token=${FINNHUB_KEY}`;
+        const url = `https://api.twelvedata.com/time_series?symbol=DXY&interval=5min&outputsize=100&apikey=${TWELVE_KEY}`;
         const data = await fetchJSON(url);
-        const price = data.c;
-        if (!price) throw new Error('No price');
-        writeFile('dxy', { currentPrice: price, history: [price], timestamp: new Date().toISOString(), source: 'Finnhub' });
+        if (!data.values || data.values.length === 0) throw new Error('No data');
+        const closes = data.values.map(v => parseFloat(v.close));
+        const currentPrice = closes[0];
+        writeFile('dxy', {
+            currentPrice,
+            history: closes,
+            timestamp: Date.now(),
+            source: 'Twelve Data (5min)'
+        });
     } catch (err) {
         writeFile('dxy', null, err);
     }
 }
 
 // ------------------------------------------------------------
-// Main – parallel execution
+// Main
 // ------------------------------------------------------------
 async function main() {
-    console.log('--- Starting data sync ---');
+    console.log('--- Fetching market data ---');
     await Promise.allSettled([
-        fetchBinanceFutures('XAUUSDT', 'xauusd'),
-        fetchBinanceFutures('XAGUSDT', 'xagusd'),
-        fetchBinanceFutures('CLUSDT', 'wtiusd'),   // WTI Oil
-        fetchCoinGecko('bitcoin', 'btcusd'),
-        fetchCoinGecko('ethereum', 'ethusd'),
-        fetchTwelveDataForex(),
+        fetchForexFrankfurter('EUR', 'eurusd'),
+        fetchForexFrankfurter('GBP', 'gbpusd'),
+        fetchGramvey('XAUUSD', 'xauusd'),
+        fetchGramvey('XAGUSD', 'xagusd'),
+        fetchOil(),
+        fetchCrypto('bitcoin', 'btcusd'),
+        fetchCrypto('ethereum', 'ethusd'),
         fetchDXY()
     ]);
     console.log('--- Data sync finished ---');
