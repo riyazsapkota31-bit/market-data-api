@@ -1,4 +1,9 @@
 {
   "error": "No data",
-  "timestamp": 1778223195569
+  "timestamp": 1778223695973,
+  "history": [
+    98.09400177001953
+  ],
+  "currentPrice": 98.09400177001953,
+  "source": "Built 5min candle"
 }

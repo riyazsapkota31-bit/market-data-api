@@ -1,6 +1,7 @@
 {
-  "currentPrice": 3.815,
+  "currentPrice": 95.27999877929688,
   "history": [
+    95.27999877929688,
     3.815,
     3.765,
     3.76,
@@ -99,9 +100,8 @@
     3.85,
     3.865,
     3.835,
-    3.815,
-    3.83
+    3.815
   ],
-  "timestamp": 1778223195590,
-  "source": "Twelve Data (5min)"
+  "timestamp": 1778223691854,
+  "source": "Built 5min candle"
 }
