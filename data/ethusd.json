@@ -1,7 +1,8 @@
 {
   "error": "HTTP 451",
-  "timestamp": 1778241036588,
+  "timestamp": 1778241327281,
   "history": [
+    2294.45,
     2291.92,
     2290.07,
     2293.14,
@@ -62,6 +63,6 @@
     2272.7,
     2273.14
   ],
-  "currentPrice": 2291.92,
+  "currentPrice": 2294.45,
   "source": "Built 5min candle"
 }
