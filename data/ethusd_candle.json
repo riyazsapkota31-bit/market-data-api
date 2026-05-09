@@ -3,12 +3,12 @@
   "startTime": 1778360455376,
   "candle": {
     "open": 2329,
-    "high": 2329,
+    "high": 2329.46,
     "low": 2328.97,
-    "close": 2328.97
+    "close": 2329.46
   },
-  "lastPrice": 2328.97,
-  "lastTimestamp": 1778360546977,
+  "lastPrice": 2329.46,
+  "lastTimestamp": 1778360664125,
   "history": [
     2314.78,
     2315.34,
