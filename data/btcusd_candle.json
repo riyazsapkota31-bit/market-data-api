@@ -4,11 +4,11 @@
   "candle": {
     "open": 80211,
     "high": 80211,
-    "low": 80205,
-    "close": 80205
+    "low": 80200,
+    "close": 80200
   },
-  "lastPrice": 80205,
-  "lastTimestamp": 1778287883409,
+  "lastPrice": 80200,
+  "lastTimestamp": 1778287940137,
   "history": [
     79711,
     79635,
