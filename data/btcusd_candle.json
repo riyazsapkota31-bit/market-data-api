@@ -5,10 +5,10 @@
     "open": 80211,
     "high": 80211,
     "low": 80200,
-    "close": 80200
+    "close": 80208
   },
-  "lastPrice": 80200,
-  "lastTimestamp": 1778287940137,
+  "lastPrice": 80208,
+  "lastTimestamp": 1778287994942,
   "history": [
     79711,
     79635,
