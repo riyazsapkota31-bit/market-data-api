@@ -1,4 +1,4 @@
-// fetch-prices.js – v10.3 (Final: within API limits, 1% risk, Gold/Silver fixed)
+// fetch-prices.js – v11.0 (Final: Gold/Silver via ExchangeRate.host, DXY fixed, Oil working)
 
 const fs = require('fs');
 const path = require('path');
@@ -14,7 +14,7 @@ const ALPHA_VANTAGE_KEY = process.env.ALPHA_VANTAGE_KEY;
 
 // ========== YOUR PERSONAL TRADING PARAMETERS ==========
 const DEFAULT_BALANCE = 7200;
-const DEFAULT_RISK_PERCENT = 1.0;      // 1% as you requested
+const DEFAULT_RISK_PERCENT = 1.0;
 const DEFAULT_MODE = 'scalp';
 
 // ========== XM STANDARD ACCOUNT SPREADS ==========
@@ -58,71 +58,73 @@ async function fetchCryptoPrice(id) {
     return data[id]?.usd;
 }
 
-// ---------- GOLD & SILVER (Multiple fallbacks) ----------
+// ---------- GOLD & SILVER (ExchangeRate.host – no key, no limits, reliable) ----------
 async function fetchMetalPrice(metal) {
     const metalName = metal === 'XAU' ? 'Gold' : 'Silver';
+    const url = `https://api.exchangerate.host/convert?from=${metal}&to=USD&amount=1`;
+    const data = await fetchJSON(url);
     
-    // Try metals.live first
-    try {
-        const url = `https://api.metals.live/v1/spot/${metal.toLowerCase()}`;
-        const data = await fetchJSON(url);
-        if (data && data.price) {
-            console.log(`✓ ${metalName} price from metals.live: $${data.price}`);
-            return data.price;
-        }
-    } catch (err) {
-        console.log(`metals.live failed for ${metalName}: ${err.message}`);
+    if (!data.result || data.result <= 0) {
+        throw new Error(`Invalid ${metalName} price response`);
     }
     
-    // Try gold-api.com as fallback
-    try {
-        const symbol = metal === 'XAU' ? 'XAUUSD' : 'XAGUSD';
-        const url = `https://api.gold-api.com/price/${symbol}`;
-        const data = await fetchJSON(url);
-        if (data && data.price) {
-            console.log(`✓ ${metalName} price from gold-api.com: $${data.price}`);
-            return data.price;
-        }
-    } catch (err) {
-        console.log(`gold-api.com failed for ${metalName}: ${err.message}`);
+    console.log(`✓ ${metalName} price via ExchangeRate.host: $${data.result}`);
+    return data.result;
+}
+
+// ---------- DXY (Twelve Data with multiple symbols) ----------
+let lastDXYPrice = null;
+let lastDXYFetchTime = 0;
+
+async function fetchDXYPrice() {
+    if (!TWELVE_DATA_KEY) throw new Error('TWELVE_DATA_KEY missing');
+    
+    const now = Date.now();
+    
+    // Cache for 2 minutes to reduce API calls
+    if (lastDXYPrice && (now - lastDXYFetchTime) < 120000) {
+        console.log('⚠️ Using cached DXY price');
+        return lastDXYPrice;
     }
     
-    // Use cached fallback
-    const fallbackFile = path.join(dataDir, `${metal.toLowerCase()}_fallback.json`);
+    const symbols = ['DXY', 'DX-Y.NYB', 'USDX'];
+    
+    for (const symbol of symbols) {
+        try {
+            const url = `https://api.twelvedata.com/price?symbol=${symbol}&apikey=${TWELVE_DATA_KEY}`;
+            const data = await fetchJSON(url);
+            
+            if (data.price) {
+                const price = parseFloat(data.price);
+                if (!isNaN(price) && price > 80 && price < 120) {
+                    console.log(`✓ DXY fetched using symbol: ${symbol} at ${price}`);
+                    lastDXYPrice = price;
+                    lastDXYFetchTime = now;
+                    return price;
+                }
+            }
+        } catch (err) {
+            console.log(`DXY symbol ${symbol} failed: ${err.message}`);
+        }
+    }
+    
+    // Fallback to cached DXY price
+    const fallbackFile = path.join(dataDir, 'dxy_fallback.json');
     if (fs.existsSync(fallbackFile)) {
         const fallback = JSON.parse(fs.readFileSync(fallbackFile));
         if (Date.now() - fallback.timestamp < 7200000) { // 2 hours stale
-            console.log(`⚠️ Using cached ${metalName} price: $${fallback.price}`);
+            console.log(`⚠️ Using cached DXY price from fallback: ${fallback.price}`);
             return fallback.price;
         }
     }
     
-    throw new Error(`Failed to fetch ${metalName} price from all sources`);
+    throw new Error('DXY not available from any source');
 }
 
-// Save metal fallback
-async function saveMetalFallback(metal, price) {
-    const fallbackFile = path.join(dataDir, `${metal.toLowerCase()}_fallback.json`);
+// Save DXY fallback
+async function saveDXYFallback(price) {
+    const fallbackFile = path.join(dataDir, 'dxy_fallback.json');
     fs.writeFileSync(fallbackFile, JSON.stringify({ price, timestamp: Date.now() }));
-}
-
-// ---------- DXY (Twelve Data only – within limit 480/day) ----------
-async function fetchDXYPrice() {
-    if (!TWELVE_DATA_KEY) throw new Error('TWELVE_DATA_KEY missing');
-    
-    const url = `https://api.twelvedata.com/price?symbol=DX-Y.NYB&apikey=${TWELVE_DATA_KEY}`;
-    const data = await fetchJSON(url);
-    
-    if (!data.price) {
-        throw new Error('Invalid DXY response from Twelve Data');
-    }
-    
-    const price = parseFloat(data.price);
-    if (isNaN(price) || price <= 0) {
-        throw new Error(`Invalid DXY price: ${data.price}`);
-    }
-    
-    return price;
 }
 
 // ---------- OIL (Alpha Vantage with correct symbols) ----------
@@ -134,9 +136,9 @@ async function fetchOilPrice() {
     
     const now = Date.now();
     
-    // Cache for 10 minutes to reduce API calls (480/day is safe, but extra buffer)
-    if (lastOilPrice && (now - lastOilFetchTime) < 600000) {
-        console.log('⚠️ Using cached oil price (10 min cache)');
+    // Cache for 2 minutes to reduce API calls
+    if (lastOilPrice && (now - lastOilFetchTime) < 120000) {
+        console.log('⚠️ Using cached oil price');
         return lastOilPrice;
     }
     
@@ -151,7 +153,7 @@ async function fetchOilPrice() {
             const quote = data['Global Quote'];
             if (quote && quote['05. price']) {
                 const price = parseFloat(quote['05. price']);
-                // Real oil should be $50-150, not $3-5 (natural gas)
+                // Real oil should be $50-150
                 if (!isNaN(price) && price > 50 && price < 150) {
                     console.log(`✓ Oil price fetched using symbol: ${symbol} at $${price}`);
                     lastOilPrice = price;
@@ -166,7 +168,7 @@ async function fetchOilPrice() {
         }
     }
     
-    // Use cached fallback if available
+    // Fallback to cached oil price
     const fallbackFile = path.join(dataDir, 'wtiusd_fallback.json');
     if (fs.existsSync(fallbackFile)) {
         const fallback = JSON.parse(fs.readFileSync(fallbackFile));
@@ -176,7 +178,7 @@ async function fetchOilPrice() {
         }
     }
     
-    throw new Error('Oil price not found from any symbol (CL, USO, BZ)');
+    throw new Error('Oil price not found from any symbol');
 }
 
 // Save oil fallback
@@ -397,13 +399,13 @@ function saveFullHistory(file, history, currentPrice) {
         currentPrice, timestamp: Date.now(), history: history.slice(-100), source: '5min candle'
     }, null, 2));
 }
-async function processAsset(file, priceFetcher, displayName, assetConfig, isOil = false, isMetal = false, metalName = null) {
+async function processAsset(file, priceFetcher, displayName, assetConfig, isOil = false, isDXY = false) {
     try {
         let price = await priceFetcher();
         if (price === undefined || price === null) throw new Error('No price');
         
         if (isOil) await saveOilFallback(price);
-        if (isMetal && metalName) await saveMetalFallback(metalName, price);
+        if (isDXY) await saveDXYFallback(price);
         
         const now = Date.now();
         const minute = Math.floor(now / 60000);
@@ -445,25 +447,25 @@ async function processAsset(file, priceFetcher, displayName, assetConfig, isOil 
 
 // ---------- MAIN ----------
 async function main() {
-    console.log('--- OMNI-SIGNAL v10.3 (Final: within API limits, 1% risk) ---');
+    console.log('--- OMNI-SIGNAL v11.0 (Final: Gold/Silver via ExchangeRate.host, DXY fixed) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
     console.log(`Twelve Data: ${!!TWELVE_DATA_KEY ? '✅' : '❌'}`);
     console.log(`Alpha Vantage: ${!!ALPHA_VANTAGE_KEY ? '✅' : '❌'}`);
     console.log(`Mode: ${DEFAULT_MODE} | Balance: $${DEFAULT_BALANCE} | Risk: ${DEFAULT_RISK_PERCENT}%`);
     
     const assets = [
-        { file: 'eurusd', fetcher: () => fetchForexPrice('EUR', 'USD'), display: 'EUR/USD', config: ASSET_CONFIGS.eurusd, isOil: false, isMetal: false },
-        { file: 'gbpusd', fetcher: () => fetchForexPrice('GBP', 'USD'), display: 'GBP/USD', config: ASSET_CONFIGS.gbpusd, isOil: false, isMetal: false },
-        { file: 'btcusd', fetcher: () => fetchCryptoPrice('bitcoin'), display: 'BTC/USD', config: ASSET_CONFIGS.btcusd, isOil: false, isMetal: false },
-        { file: 'ethusd', fetcher: () => fetchCryptoPrice('ethereum'), display: 'ETH/USD', config: ASSET_CONFIGS.ethusd, isOil: false, isMetal: false },
-        { file: 'xauusd', fetcher: () => fetchMetalPrice('XAU'), display: 'XAUUSD (Gold)', config: ASSET_CONFIGS.xauusd, isOil: false, isMetal: true, metalName: 'XAU' },
-        { file: 'xagusd', fetcher: () => fetchMetalPrice('XAG'), display: 'XAGUSD (Silver)', config: ASSET_CONFIGS.xagusd, isOil: false, isMetal: true, metalName: 'XAG' },
-        { file: 'wtiusd', fetcher: fetchOilPrice, display: 'WTI Oil', config: ASSET_CONFIGS.wtiusd, isOil: true, isMetal: false },
-        { file: 'dxy', fetcher: fetchDXYPrice, display: 'DXY', config: ASSET_CONFIGS.dxy, isOil: false, isMetal: false }
+        { file: 'eurusd', fetcher: () => fetchForexPrice('EUR', 'USD'), display: 'EUR/USD', config: ASSET_CONFIGS.eurusd, isOil: false, isDXY: false },
+        { file: 'gbpusd', fetcher: () => fetchForexPrice('GBP', 'USD'), display: 'GBP/USD', config: ASSET_CONFIGS.gbpusd, isOil: false, isDXY: false },
+        { file: 'btcusd', fetcher: () => fetchCryptoPrice('bitcoin'), display: 'BTC/USD', config: ASSET_CONFIGS.btcusd, isOil: false, isDXY: false },
+        { file: 'ethusd', fetcher: () => fetchCryptoPrice('ethereum'), display: 'ETH/USD', config: ASSET_CONFIGS.ethusd, isOil: false, isDXY: false },
+        { file: 'xauusd', fetcher: () => fetchMetalPrice('XAU'), display: 'XAUUSD (Gold)', config: ASSET_CONFIGS.xauusd, isOil: false, isDXY: false },
+        { file: 'xagusd', fetcher: () => fetchMetalPrice('XAG'), display: 'XAGUSD (Silver)', config: ASSET_CONFIGS.xagusd, isOil: false, isDXY: false },
+        { file: 'wtiusd', fetcher: fetchOilPrice, display: 'WTI Oil', config: ASSET_CONFIGS.wtiusd, isOil: true, isDXY: false },
+        { file: 'dxy', fetcher: fetchDXYPrice, display: 'DXY', config: ASSET_CONFIGS.dxy, isOil: false, isDXY: true }
     ];
     
     for (const asset of assets) {
-        await processAsset(asset.file, asset.fetcher, asset.display, asset.config, asset.isOil, asset.isMetal, asset.metalName);
+        await processAsset(asset.file, asset.fetcher, asset.display, asset.config, asset.isOil, asset.isDXY);
         await new Promise(r => setTimeout(r, 500));
     }
     console.log('--- Completed ---');
