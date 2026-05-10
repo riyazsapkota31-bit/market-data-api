@@ -1,4 +1,4 @@
-// fetch-prices.js – v10.1 (3-min runs, no cache, all APIs working)
+// fetch-prices.js – v10.2 (Alpha Vantage oil via GLOBAL_QUOTE with fallback)
 
 const fs = require('fs');
 const path = require('path');
@@ -14,7 +14,7 @@ const ALPHA_VANTAGE_KEY = process.env.ALPHA_VANTAGE_KEY;
 
 // ========== YOUR PERSONAL TRADING PARAMETERS ==========
 const DEFAULT_BALANCE = 7200;
-const DEFAULT_RISK_PERCENT = 0.5;
+const DEFAULT_RISK_PERCENT = 1;
 const DEFAULT_MODE = 'scalp';
 
 // ========== XM STANDARD ACCOUNT SPREADS ==========
@@ -71,13 +71,57 @@ async function fetchDXYPrice() {
     return parseFloat(data.price);
 }
 
+// Alpha Vantage Oil Price using GLOBAL_QUOTE (with fallback symbols)
 async function fetchOilPrice() {
     if (!ALPHA_VANTAGE_KEY) throw new Error('ALPHA_VANTAGE_KEY missing');
-    const url = `https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=WTI&to_currency=USD&apikey=${ALPHA_VANTAGE_KEY}`;
-    const data = await fetchJSON(url);
-    const rate = data['Realtime Currency Exchange Rate']?.['5. Exchange Rate'];
-    if (!rate) throw new Error('Oil price not found');
-    return parseFloat(rate);
+    
+    // Try different symbols in order
+    const symbols = ['WTI', 'CL', 'BZ'];
+    let lastError = null;
+    
+    for (const symbol of symbols) {
+        try {
+            const url = `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=${ALPHA_VANTAGE_KEY}`;
+            const data = await fetchJSON(url);
+            
+            // Log response for debugging (first run only)
+            if (symbol === symbols[0]) {
+                console.log(`Alpha Vantage response for ${symbol}:`, JSON.stringify(data).slice(0, 200));
+            }
+            
+            const quote = data['Global Quote'];
+            if (quote && quote['05. price']) {
+                const price = parseFloat(quote['05. price']);
+                if (!isNaN(price) && price > 0) {
+                    console.log(`✓ Oil price fetched using symbol: ${symbol}`);
+                    return price;
+                }
+            }
+        } catch (err) {
+            lastError = err;
+            console.log(`Symbol ${symbol} failed: ${err.message}`);
+        }
+    }
+    
+    // If all symbols fail, try fallback cache
+    const fallbackFile = path.join(dataDir, 'wtiusd_fallback.json');
+    if (fs.existsSync(fallbackFile)) {
+        try {
+            const fallback = JSON.parse(fs.readFileSync(fallbackFile));
+            if (Date.now() - fallback.timestamp < 3600000) { // 1 hour stale
+                console.log('⚠️ Using cached oil price from fallback');
+                return fallback.price;
+            }
+        } catch(e) {}
+    }
+    
+    throw new Error(`Oil price not found. Last error: ${lastError?.message || 'All symbols failed'}`);
+}
+
+// Save oil fallback price
+async function saveOilFallback(price) {
+    const fallbackFile = path.join(dataDir, 'wtiusd_fallback.json');
+    fs.writeFileSync(fallbackFile, JSON.stringify({ price, timestamp: Date.now() }));
 }
 
 // ---------- TECHNICAL INDICATORS ----------
@@ -292,10 +336,12 @@ function saveFullHistory(file, history, currentPrice) {
         currentPrice, timestamp: Date.now(), history: history.slice(-100), source: '5min candle'
     }, null, 2));
 }
-async function processAsset(file, priceFetcher, displayName, assetConfig) {
+async function processAsset(file, priceFetcher, displayName, assetConfig, isOil = false) {
     try {
-        const price = await priceFetcher();
+        let price = await priceFetcher();
         if (price === undefined || price === null) throw new Error('No price');
+        if (isOil) await saveOilFallback(price);
+        
         const now = Date.now();
         const minute = Math.floor(now / 60000);
         const current5minBucket = Math.floor(minute / 5);
@@ -336,25 +382,25 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
 
 // ---------- MAIN ----------
 async function main() {
-    console.log('--- OMNI-SIGNAL v10.1 (3-min runs, all APIs working) ---');
+    console.log('--- OMNI-SIGNAL v10.2 (Alpha Vantage GLOBAL_QUOTE for oil) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
     console.log(`Twelve Data: ${!!TWELVE_DATA_KEY ? '✅' : '❌'}`);
     console.log(`Alpha Vantage: ${!!ALPHA_VANTAGE_KEY ? '✅' : '❌'}`);
     console.log(`Mode: ${DEFAULT_MODE} | Balance: $${DEFAULT_BALANCE} | Risk: ${DEFAULT_RISK_PERCENT}%`);
     
     const assets = [
-        { file: 'eurusd', fetcher: () => fetchForexPrice('EUR', 'USD'), display: 'EUR/USD', config: ASSET_CONFIGS.eurusd },
-        { file: 'gbpusd', fetcher: () => fetchForexPrice('GBP', 'USD'), display: 'GBP/USD', config: ASSET_CONFIGS.gbpusd },
-        { file: 'btcusd', fetcher: () => fetchCryptoPrice('bitcoin'), display: 'BTC/USD', config: ASSET_CONFIGS.btcusd },
-        { file: 'ethusd', fetcher: () => fetchCryptoPrice('ethereum'), display: 'ETH/USD', config: ASSET_CONFIGS.ethusd },
-        { file: 'xauusd', fetcher: () => fetchMetalPrice('XAU'), display: 'XAUUSD (Gold)', config: ASSET_CONFIGS.xauusd },
-        { file: 'xagusd', fetcher: () => fetchMetalPrice('XAG'), display: 'XAGUSD (Silver)', config: ASSET_CONFIGS.xagusd },
-        { file: 'wtiusd', fetcher: fetchOilPrice, display: 'WTI Oil', config: ASSET_CONFIGS.wtiusd },
-        { file: 'dxy', fetcher: fetchDXYPrice, display: 'DXY', config: ASSET_CONFIGS.dxy }
+        { file: 'eurusd', fetcher: () => fetchForexPrice('EUR', 'USD'), display: 'EUR/USD', config: ASSET_CONFIGS.eurusd, isOil: false },
+        { file: 'gbpusd', fetcher: () => fetchForexPrice('GBP', 'USD'), display: 'GBP/USD', config: ASSET_CONFIGS.gbpusd, isOil: false },
+        { file: 'btcusd', fetcher: () => fetchCryptoPrice('bitcoin'), display: 'BTC/USD', config: ASSET_CONFIGS.btcusd, isOil: false },
+        { file: 'ethusd', fetcher: () => fetchCryptoPrice('ethereum'), display: 'ETH/USD', config: ASSET_CONFIGS.ethusd, isOil: false },
+        { file: 'xauusd', fetcher: () => fetchMetalPrice('XAU'), display: 'XAUUSD (Gold)', config: ASSET_CONFIGS.xauusd, isOil: false },
+        { file: 'xagusd', fetcher: () => fetchMetalPrice('XAG'), display: 'XAGUSD (Silver)', config: ASSET_CONFIGS.xagusd, isOil: false },
+        { file: 'wtiusd', fetcher: fetchOilPrice, display: 'WTI Oil', config: ASSET_CONFIGS.wtiusd, isOil: true },
+        { file: 'dxy', fetcher: fetchDXYPrice, display: 'DXY', config: ASSET_CONFIGS.dxy, isOil: false }
     ];
     
     for (const asset of assets) {
-        await processAsset(asset.file, asset.fetcher, asset.display, asset.config);
+        await processAsset(asset.file, asset.fetcher, asset.display, asset.config, asset.isOil);
         await new Promise(r => setTimeout(r, 500));
     }
     console.log('--- Completed ---');
