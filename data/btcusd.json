@@ -1,8 +1,7 @@
 {
-  "currentPrice": 80766,
-  "timestamp": 1778408778510,
+  "currentPrice": 80785,
+  "timestamp": 1778409264934,
   "history": [
-    80619,
     80631,
     80604,
     80614,
@@ -101,7 +100,8 @@
     80729,
     80749,
     80714,
-    80766
+    80766,
+    80785
   ],
-  "source": "Built 5min candle"
+  "source": "5min candle"
 }
