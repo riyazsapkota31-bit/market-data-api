@@ -1,4 +1,4 @@
-// fetch-prices.js – v7.3 (Yahoo fix only, NO test alerts, original thresholds preserved)
+// fetch-prices.js – v8.1 (XM spreads, personal params, full trade setup in Telegram)
 
 const fs = require('fs');
 const path = require('path');
@@ -6,8 +6,30 @@ const path = require('path');
 const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
 
+// Telegram configuration (from GitHub Secrets)
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+// ========== YOUR PERSONAL TRADING PARAMETERS ==========
+const DEFAULT_BALANCE = 7200;        // Your demo balance
+const DEFAULT_RISK_PERCENT = 1;    // Risk per trade (%)
+const DEFAULT_MODE = 'scalp';        // 'scalp' or 'day'
+
+// ========== ASSET CONFIGURATIONS (XM Standard Account Spreads) ==========
+const ASSET_CONFIGS = {
+    // Forex
+    eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex' },
+    gbpusd: { multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex' },
+    // Cryptocurrencies
+    btcusd: { multiplier: 10, spread: 75.00, digits: 0, class: 'crypto' },
+    ethusd: { multiplier: 10, spread: 6.00, digits: 0, class: 'crypto' },
+    // Commodities
+    xauusd: { multiplier: 100, spread: 0.040, digits: 2, class: 'commodities' },
+    xagusd: { multiplier: 100, spread: 0.030, digits: 3, class: 'commodities' },
+    wtiusd: { multiplier: 100, spread: 0.030, digits: 2, class: 'commodities' },
+    // Dollar Index
+    dxy: { multiplier: 100, spread: 0.05, digits: 4, class: 'forex' }
+};
 
 // Helper: fetch JSON with timeout
 async function fetchJSON(url, timeout = 15000) {
@@ -24,7 +46,7 @@ async function fetchJSON(url, timeout = 15000) {
     }
 }
 
-// IMPROVED Yahoo Finance fetcher (multiple proxies for reliability)
+// Improved Yahoo Finance fetcher (multiple proxies)
 async function fetchYahooPrice(symbol) {
     const proxies = [
         (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
@@ -47,14 +69,13 @@ async function fetchYahooPrice(symbol) {
                 }
             }
         } catch (e) {
-            // Try next proxy
             continue;
         }
     }
     throw new Error('All Yahoo proxies failed');
 }
 
-// Forex fetcher (works fine)
+// Forex fetcher (Frankfurter)
 async function fetchForexPrice(base, quote) {
     const url = `https://api.frankfurter.app/latest?from=${base}&to=${quote}`;
     const data = await fetchJSON(url);
@@ -63,7 +84,7 @@ async function fetchForexPrice(base, quote) {
     return rate;
 }
 
-// Crypto fetcher (works fine)
+// Crypto fetcher (CoinGecko)
 async function fetchCryptoPrice(id) {
     const url = `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`;
     const data = await fetchJSON(url);
@@ -72,7 +93,7 @@ async function fetchCryptoPrice(id) {
     return price;
 }
 
-// ========== TECHNICAL INDICATORS (YOUR ORIGINAL) ==========
+// ========== TECHNICAL INDICATORS ==========
 function calcRSI(prices, period = 14) {
     if (prices.length < period + 1) return 50;
     let gains = 0, losses = 0;
@@ -98,8 +119,90 @@ function calcEMA(prices, period) {
     return ema;
 }
 
-// ========== STRATEGY ANALYSIS (YOUR ORIGINAL - THRESHOLD 100) ==========
-function analyzeSignal(prices, candleData) {
+function calcATR(prices, period = 14) {
+    if (prices.length < period + 1) {
+        return (Math.max(...prices.slice(-period)) - Math.min(...prices.slice(-period))) / period;
+    }
+    let trSum = 0;
+    for (let i = prices.length - period; i < prices.length; i++) {
+        if (i === 0) continue;
+        const high = prices[i];
+        const low = prices[i];
+        const prevClose = prices[i-1];
+        const hl = high - low;
+        const hc = Math.abs(high - prevClose);
+        const lc = Math.abs(low - prevClose);
+        trSum += Math.max(hl, hc, lc);
+    }
+    return trSum / period;
+}
+
+// ========== RISK MANAGER LOGIC (copied from your risk-manager.js) ==========
+function calculateTradeLevels(currentPrice, atr, support, resistance, signalBias, confidence, mode, multiplier, spread, digits) {
+    let entry, sl, tp1, tp2, rrRatio = 0;
+    
+    if (signalBias === 'BUY') {
+        entry = currentPrice;
+        const atrMult = mode === 'scalp' ? 0.45 : 1.0;
+        let slDist = atr * atrMult;
+        sl = entry - slDist;
+        if (sl > support) sl = support * 0.998;
+        const minRR = mode === 'scalp' ? 1.5 : 4.0;
+        const maxRR = mode === 'scalp' ? 4.0 : 12.0;
+        const targetRR = Math.min(minRR + (confidence / 100) * 3, maxRR);
+        const risk = entry - sl;
+        tp1 = entry + risk;
+        tp2 = entry + risk * targetRR;
+        if (tp2 > resistance) {
+            tp2 = resistance * 0.998;
+            rrRatio = (tp2 - entry) / risk;
+        } else {
+            rrRatio = targetRR;
+        }
+    } else if (signalBias === 'SELL') {
+        entry = currentPrice;
+        const atrMult = mode === 'scalp' ? 0.45 : 1.0;
+        let slDist = atr * atrMult;
+        sl = entry + slDist;
+        if (sl < resistance) sl = resistance * 1.002;
+        const minRR = mode === 'scalp' ? 1.5 : 4.0;
+        const maxRR = mode === 'scalp' ? 4.0 : 12.0;
+        const targetRR = Math.min(minRR + (confidence / 100) * 3, maxRR);
+        const risk = sl - entry;
+        tp1 = entry - risk;
+        tp2 = entry - risk * targetRR;
+        if (tp2 < support) {
+            tp2 = support * 1.002;
+            rrRatio = (entry - tp2) / risk;
+        } else {
+            rrRatio = targetRR;
+        }
+    } else {
+        return null;
+    }
+    
+    const minRRReq = mode === 'scalp' ? 1.5 : 4.0;
+    if (rrRatio < minRRReq) return null;
+    
+    // Calculate lot size using your balance and risk %
+    const riskAmount = DEFAULT_BALANCE * (DEFAULT_RISK_PERCENT / 100);
+    const stopDist = Math.abs(entry - sl) + spread;
+    let lotSize = riskAmount / (stopDist * multiplier);
+    lotSize = Math.floor(lotSize * 1000) / 1000;
+    lotSize = Math.max(0.01, Math.min(lotSize, 50));
+    
+    return {
+        entry: entry.toFixed(digits),
+        sl: sl.toFixed(digits),
+        tp1: tp1.toFixed(digits),
+        tp2: tp2.toFixed(digits),
+        rrRatio: rrRatio.toFixed(1),
+        lotSize: lotSize.toFixed(2)
+    };
+}
+
+// ========== STRATEGY ANALYSIS (same threshold 100, choppy filter active) ==========
+function analyzeSignal(prices, candleData, assetClass = 'commodities') {
     if (prices.length < 50) {
         return { bias: 'WAIT', confidence: 30, reasons: ['Insufficient data (need 50 candles)'], rsi: 50, trend: 'SIDEWAYS', currentPrice: prices[prices.length-1] };
     }
@@ -109,6 +212,10 @@ function analyzeSignal(prices, candleData) {
     const ema20 = calcEMA(prices, 20);
     const ema50 = calcEMA(prices, 50);
     const ema200 = calcEMA(prices, 200);
+    const atr = calcATR(prices, 14);
+    
+    const support = Math.min(...prices.slice(-50)) * 0.998;
+    const resistance = Math.max(...prices.slice(-50)) * 1.002;
     
     let trend = 'SIDEWAYS';
     if (ema20 > ema50 && ema50 > ema200) trend = 'BULLISH';
@@ -117,7 +224,7 @@ function analyzeSignal(prices, candleData) {
     const isChoppy = Math.abs(ema20 - ema50) / currentPrice < 0.001;
     
     if (isChoppy) {
-        return { bias: 'WAIT', confidence: 35, reasons: ['Market choppy (EMAs too close)'], rsi, trend, currentPrice };
+        return { bias: 'WAIT', confidence: 35, reasons: ['Market choppy (EMAs too close)'], rsi, trend, currentPrice, atr, support, resistance };
     }
     
     let buyScore = 0;
@@ -148,11 +255,10 @@ function analyzeSignal(prices, candleData) {
         reasons.push('Bearish EMA pullback');
     }
     
-    // Support/Resistance
-    const recentLows = Math.min(...prices.slice(-20));
-    const recentHighs = Math.max(...prices.slice(-20));
-    const nearSupport = Math.abs(currentPrice - recentLows) / currentPrice * 100 < 0.2;
-    const nearResistance = Math.abs(currentPrice - recentHighs) / currentPrice * 100 < 0.2;
+    // Support/Resistance Bounce
+    const atrPerc = atr / currentPrice * 100;
+    const nearSupport = Math.abs(currentPrice - support) / currentPrice * 100 < atrPerc * 0.5;
+    const nearResistance = Math.abs(currentPrice - resistance) / currentPrice * 100 < atrPerc * 0.5;
     
     if (nearSupport && rsi < 50) {
         buyScore += 80;
@@ -166,7 +272,7 @@ function analyzeSignal(prices, candleData) {
     if (trend === 'BULLISH') buyScore += 15;
     if (trend === 'BEARISH') sellScore += 15;
     
-    // YOUR ORIGINAL THRESHOLD: 100 (NOT CHANGED)
+    // THRESHOLD = 100 (unchanged)
     let bias = 'WAIT';
     let confidence = 50;
     
@@ -178,34 +284,65 @@ function analyzeSignal(prices, candleData) {
         confidence = Math.min(85, 50 + Math.floor(sellScore / 3));
     }
     
-    return { bias, confidence, reasons, rsi, trend, currentPrice, ema20, ema50 };
+    return { bias, confidence, reasons, rsi, trend, currentPrice, ema20, ema50, atr, support, resistance };
 }
 
-// ========== TELEGRAM SENDER ==========
-async function sendTelegramAlert(symbolDisplay, signal) {
+// ========== TELEGRAM SENDER (full trade setup included) ==========
+async function sendTelegramAlert(symbolDisplay, signal, assetConfig) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
         console.log('Telegram not configured');
         return false;
     }
     
+    let tradeLevels = null;
+    if (signal.bias !== 'WAIT') {
+        tradeLevels = calculateTradeLevels(
+            signal.currentPrice,
+            signal.atr,
+            signal.support,
+            signal.resistance,
+            signal.bias,
+            signal.confidence,
+            DEFAULT_MODE,
+            assetConfig.multiplier,
+            assetConfig.spread,
+            assetConfig.digits
+        );
+    }
+    
     const icon = signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL';
     const timestamp = new Date().toLocaleString();
     
-    const message = `
+    let message = `
 🤖 OMNI-SIGNAL ALERT 🤖
 ━━━━━━━━━━━━━━━━━━━
 ${icon} | ${signal.confidence}% confidence
 ⏰ ${timestamp}
 
 📊 ${symbolDisplay}
-💰 Price: ${signal.currentPrice?.toFixed(2) || signal.currentPrice}
-📈 RSI: ${signal.rsi?.toFixed(1)} | Trend: ${signal.trend}
+💰 Price: ${signal.currentPrice.toFixed(assetConfig.digits)}
+📈 RSI: ${signal.rsi.toFixed(1)} | Trend: ${signal.trend}
+📊 ATR: ${signal.atr.toFixed(assetConfig.digits === 5 ? 5 : 2)}
 
 ━━━━━━━━━━━━━━━━━━━
-💡 ${signal.reasons?.slice(0,2).join(', ') || 'Signal detected'}
-
-⚠️ Auto-generated by OMNI-SIGNAL
-    `.trim();
+💡 ${signal.reasons.slice(0,2).join(', ') || 'Signal detected'}
+`;
+    
+    if (tradeLevels) {
+        message += `
+━━━━━━━━━━━━━━━━━━━
+🎯 <b>TRADE SETUP</b>
+📥 Entry: ${tradeLevels.entry}
+🛑 Stop Loss: ${tradeLevels.sl}
+🎯 TP1: ${tradeLevels.tp1} | TP2: ${tradeLevels.tp2}
+📐 Risk/Reward: 1:${tradeLevels.rrRatio}
+💰 Lot Size: ${tradeLevels.lotSize}
+`;
+    }
+    
+    message += `
+⚠️ Auto-generated by OMNI-SIGNAL | Mode: ${DEFAULT_MODE} | Risk: ${DEFAULT_RISK_PERCENT}% | Balance: $${DEFAULT_BALANCE}
+    `;
     
     try {
         const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -220,7 +357,7 @@ ${icon} | ${signal.confidence}% confidence
         });
         const result = await response.json();
         if (result.ok) {
-            console.log(`✅ Telegram alert sent for ${symbolDisplay}`);
+            console.log(`✅ Telegram alert sent for ${symbolDisplay} with full setup`);
             return true;
         }
         console.error('Telegram error:', result.description);
@@ -269,7 +406,7 @@ function saveFullHistory(file, history, currentPrice) {
     fs.writeFileSync(historyFile, JSON.stringify(data, null, 2));
 }
 
-async function processAsset(file, priceFetcher, displayName) {
+async function processAsset(file, priceFetcher, displayName, assetConfig) {
     try {
         const price = await priceFetcher();
         if (price === undefined || price === null) throw new Error('No price');
@@ -287,11 +424,11 @@ async function processAsset(file, priceFetcher, displayName) {
                 saveFullHistory(file, history, state.lastPrice);
                 
                 if (history.length >= 50) {
-                    const signal = analyzeSignal(history, state.candle);
+                    const signal = analyzeSignal(history, state.candle, assetConfig.class);
                     console.log(`📊 ${displayName} - Signal: ${signal.bias} (${signal.confidence}%) - ${signal.reasons.slice(0,1).join(', ') || 'No confluence'}`);
                     
                     if (signal.bias !== 'WAIT' && signal.confidence >= 55) {
-                        await sendTelegramAlert(displayName, signal);
+                        await sendTelegramAlert(displayName, signal, assetConfig);
                     }
                 }
             }
@@ -323,20 +460,21 @@ async function processAsset(file, priceFetcher, displayName) {
 async function main() {
     console.log('--- Fetching minute snapshots with automatic signal detection ---');
     console.log(`Telegram configured: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID}`);
+    console.log(`Mode: ${DEFAULT_MODE} | Balance: $${DEFAULT_BALANCE} | Risk: ${DEFAULT_RISK_PERCENT}%`);
     
     const assets = [
-        { file: 'eurusd', fetcher: () => fetchForexPrice('EUR', 'USD'), display: 'EUR/USD' },
-        { file: 'gbpusd', fetcher: () => fetchForexPrice('GBP', 'USD'), display: 'GBP/USD' },
-        { file: 'btcusd', fetcher: () => fetchCryptoPrice('bitcoin'), display: 'BTC/USD' },
-        { file: 'ethusd', fetcher: () => fetchCryptoPrice('ethereum'), display: 'ETH/USD' },
-        { file: 'xauusd', fetcher: () => fetchYahooPrice('GC=F'), display: 'XAUUSD (Gold)' },
-        { file: 'xagusd', fetcher: () => fetchYahooPrice('SI=F'), display: 'XAGUSD (Silver)' },
-        { file: 'wtiusd', fetcher: () => fetchYahooPrice('CL=F'), display: 'WTI Oil' },
-        { file: 'dxy', fetcher: () => fetchYahooPrice('DX-Y.NYB'), display: 'DXY' }
+        { file: 'eurusd', fetcher: () => fetchForexPrice('EUR', 'USD'), display: 'EUR/USD', config: ASSET_CONFIGS.eurusd },
+        { file: 'gbpusd', fetcher: () => fetchForexPrice('GBP', 'USD'), display: 'GBP/USD', config: ASSET_CONFIGS.gbpusd },
+        { file: 'btcusd', fetcher: () => fetchCryptoPrice('bitcoin'), display: 'BTC/USD', config: ASSET_CONFIGS.btcusd },
+        { file: 'ethusd', fetcher: () => fetchCryptoPrice('ethereum'), display: 'ETH/USD', config: ASSET_CONFIGS.ethusd },
+        { file: 'xauusd', fetcher: () => fetchYahooPrice('GC=F'), display: 'XAUUSD (Gold)', config: ASSET_CONFIGS.xauusd },
+        { file: 'xagusd', fetcher: () => fetchYahooPrice('SI=F'), display: 'XAGUSD (Silver)', config: ASSET_CONFIGS.xagusd },
+        { file: 'wtiusd', fetcher: () => fetchYahooPrice('CL=F'), display: 'WTI Oil', config: ASSET_CONFIGS.wtiusd },
+        { file: 'dxy', fetcher: () => fetchYahooPrice('DX-Y.NYB'), display: 'DXY', config: ASSET_CONFIGS.dxy }
     ];
     
     for (const asset of assets) {
-        await processAsset(asset.file, asset.fetcher, asset.display);
+        await processAsset(asset.file, asset.fetcher, asset.display, asset.config);
         await new Promise(resolve => setTimeout(resolve, 500));
     }
     
