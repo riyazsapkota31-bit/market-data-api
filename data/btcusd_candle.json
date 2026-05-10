@@ -3,12 +3,12 @@
   "startTime": 1778371255237,
   "candle": {
     "open": 80676,
-    "high": 80676,
+    "high": 80680,
     "low": 80664,
-    "close": 80664
+    "close": 80680
   },
-  "lastPrice": 80664,
-  "lastTimestamp": 1778371339785,
+  "lastPrice": 80680,
+  "lastTimestamp": 1778371457879,
   "history": [
     80515,
     80489,
