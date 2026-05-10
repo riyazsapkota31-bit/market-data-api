@@ -1,4 +1,4 @@
-// fetch-prices.js – v11.0 (Final: Gold/Silver via ExchangeRate.host, DXY fixed, Oil working)
+// fetch-prices.js – v11.1 (Final: Cache fallbacks for Gold, Silver, DXY – no errors on weekends)
 
 const fs = require('fs');
 const path = require('path');
@@ -58,21 +58,64 @@ async function fetchCryptoPrice(id) {
     return data[id]?.usd;
 }
 
-// ---------- GOLD & SILVER (ExchangeRate.host – no key, no limits, reliable) ----------
+// ---------- GOLD & SILVER (ExchangeRate.host with cache fallback) ----------
+let lastGoldPrice = null;
+let lastGoldFetchTime = 0;
+let lastSilverPrice = null;
+let lastSilverFetchTime = 0;
+
 async function fetchMetalPrice(metal) {
     const metalName = metal === 'XAU' ? 'Gold' : 'Silver';
-    const url = `https://api.exchangerate.host/convert?from=${metal}&to=USD&amount=1`;
-    const data = await fetchJSON(url);
+    const cachePrice = metal === 'XAU' ? lastGoldPrice : lastSilverPrice;
+    const cacheTime = metal === 'XAU' ? lastGoldFetchTime : lastSilverFetchTime;
+    const now = Date.now();
     
-    if (!data.result || data.result <= 0) {
-        throw new Error(`Invalid ${metalName} price response`);
+    // Use cache if less than 6 hours old (covers weekends)
+    if (cachePrice && (now - cacheTime) < 21600000) {
+        console.log(`⚠️ Using cached ${metalName} price: $${cachePrice}`);
+        return cachePrice;
     }
     
-    console.log(`✓ ${metalName} price via ExchangeRate.host: $${data.result}`);
-    return data.result;
+    try {
+        const url = `https://api.exchangerate.host/convert?from=${metal}&to=USD&amount=1`;
+        const data = await fetchJSON(url);
+        
+        if (data.result && data.result > 0 && !isNaN(data.result)) {
+            console.log(`✓ ${metalName} price via ExchangeRate.host: $${data.result}`);
+            if (metal === 'XAU') {
+                lastGoldPrice = data.result;
+                lastGoldFetchTime = now;
+            } else {
+                lastSilverPrice = data.result;
+                lastSilverFetchTime = now;
+            }
+            return data.result;
+        }
+        throw new Error('Invalid price response');
+    } catch (err) {
+        console.log(`ExchangeRate.host failed for ${metalName}: ${err.message}`);
+        
+        // Try fallback cache from file
+        const fallbackFile = path.join(dataDir, `${metal.toLowerCase()}_fallback.json`);
+        if (fs.existsSync(fallbackFile)) {
+            const fallback = JSON.parse(fs.readFileSync(fallbackFile));
+            if (Date.now() - fallback.timestamp < 86400000) { // 24 hours stale
+                console.log(`⚠️ Using file cached ${metalName} price: $${fallback.price}`);
+                return fallback.price;
+            }
+        }
+        
+        throw new Error(`Failed to fetch ${metalName} price from all sources`);
+    }
 }
 
-// ---------- DXY (Twelve Data with multiple symbols) ----------
+// Save metal fallback
+async function saveMetalFallback(metal, price) {
+    const fallbackFile = path.join(dataDir, `${metal.toLowerCase()}_fallback.json`);
+    fs.writeFileSync(fallbackFile, JSON.stringify({ price, timestamp: Date.now() }));
+}
+
+// ---------- DXY (Twelve Data with cache fallback) ----------
 let lastDXYPrice = null;
 let lastDXYFetchTime = 0;
 
@@ -81,9 +124,9 @@ async function fetchDXYPrice() {
     
     const now = Date.now();
     
-    // Cache for 2 minutes to reduce API calls
-    if (lastDXYPrice && (now - lastDXYFetchTime) < 120000) {
-        console.log('⚠️ Using cached DXY price');
+    // Use cache if less than 6 hours old
+    if (lastDXYPrice && (now - lastDXYFetchTime) < 21600000) {
+        console.log(`⚠️ Using cached DXY price: ${lastDXYPrice}`);
         return lastDXYPrice;
     }
     
@@ -108,12 +151,12 @@ async function fetchDXYPrice() {
         }
     }
     
-    // Fallback to cached DXY price
+    // Fallback to file cache
     const fallbackFile = path.join(dataDir, 'dxy_fallback.json');
     if (fs.existsSync(fallbackFile)) {
         const fallback = JSON.parse(fs.readFileSync(fallbackFile));
-        if (Date.now() - fallback.timestamp < 7200000) { // 2 hours stale
-            console.log(`⚠️ Using cached DXY price from fallback: ${fallback.price}`);
+        if (Date.now() - fallback.timestamp < 86400000) { // 24 hours stale
+            console.log(`⚠️ Using file cached DXY price: ${fallback.price}`);
             return fallback.price;
         }
     }
@@ -127,7 +170,7 @@ async function saveDXYFallback(price) {
     fs.writeFileSync(fallbackFile, JSON.stringify({ price, timestamp: Date.now() }));
 }
 
-// ---------- OIL (Alpha Vantage with correct symbols) ----------
+// ---------- OIL (Alpha Vantage with cache) ----------
 let lastOilPrice = null;
 let lastOilFetchTime = 0;
 
@@ -136,13 +179,12 @@ async function fetchOilPrice() {
     
     const now = Date.now();
     
-    // Cache for 2 minutes to reduce API calls
-    if (lastOilPrice && (now - lastOilFetchTime) < 120000) {
-        console.log('⚠️ Using cached oil price');
+    // Use cache if less than 2 hours old (trading hours) or 6 hours on weekends
+    if (lastOilPrice && (now - lastOilFetchTime) < 21600000) {
+        console.log(`⚠️ Using cached oil price: $${lastOilPrice}`);
         return lastOilPrice;
     }
     
-    // Correct symbols for Crude Oil WTI
     const symbols = ['CL', 'USO', 'BZ'];
     
     for (const symbol of symbols) {
@@ -153,7 +195,6 @@ async function fetchOilPrice() {
             const quote = data['Global Quote'];
             if (quote && quote['05. price']) {
                 const price = parseFloat(quote['05. price']);
-                // Real oil should be $50-150
                 if (!isNaN(price) && price > 50 && price < 150) {
                     console.log(`✓ Oil price fetched using symbol: ${symbol} at $${price}`);
                     lastOilPrice = price;
@@ -168,12 +209,12 @@ async function fetchOilPrice() {
         }
     }
     
-    // Fallback to cached oil price
+    // Fallback to file cache
     const fallbackFile = path.join(dataDir, 'wtiusd_fallback.json');
     if (fs.existsSync(fallbackFile)) {
         const fallback = JSON.parse(fs.readFileSync(fallbackFile));
-        if (Date.now() - fallback.timestamp < 7200000) { // 2 hours stale
-            console.log(`⚠️ Using cached oil price from fallback: $${fallback.price}`);
+        if (Date.now() - fallback.timestamp < 86400000) { // 24 hours stale
+            console.log(`⚠️ Using file cached oil price: $${fallback.price}`);
             return fallback.price;
         }
     }
@@ -399,13 +440,14 @@ function saveFullHistory(file, history, currentPrice) {
         currentPrice, timestamp: Date.now(), history: history.slice(-100), source: '5min candle'
     }, null, 2));
 }
-async function processAsset(file, priceFetcher, displayName, assetConfig, isOil = false, isDXY = false) {
+async function processAsset(file, priceFetcher, displayName, assetConfig, isOil = false, isDXY = false, isMetal = false, metalName = null) {
     try {
         let price = await priceFetcher();
         if (price === undefined || price === null) throw new Error('No price');
         
         if (isOil) await saveOilFallback(price);
         if (isDXY) await saveDXYFallback(price);
+        if (isMetal && metalName) await saveMetalFallback(metalName, price);
         
         const now = Date.now();
         const minute = Math.floor(now / 60000);
@@ -447,25 +489,25 @@ async function processAsset(file, priceFetcher, displayName, assetConfig, isOil 
 
 // ---------- MAIN ----------
 async function main() {
-    console.log('--- OMNI-SIGNAL v11.0 (Final: Gold/Silver via ExchangeRate.host, DXY fixed) ---');
+    console.log('--- OMNI-SIGNAL v11.1 (Cache fallbacks for Gold, Silver, DXY) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
     console.log(`Twelve Data: ${!!TWELVE_DATA_KEY ? '✅' : '❌'}`);
     console.log(`Alpha Vantage: ${!!ALPHA_VANTAGE_KEY ? '✅' : '❌'}`);
     console.log(`Mode: ${DEFAULT_MODE} | Balance: $${DEFAULT_BALANCE} | Risk: ${DEFAULT_RISK_PERCENT}%`);
     
     const assets = [
-        { file: 'eurusd', fetcher: () => fetchForexPrice('EUR', 'USD'), display: 'EUR/USD', config: ASSET_CONFIGS.eurusd, isOil: false, isDXY: false },
-        { file: 'gbpusd', fetcher: () => fetchForexPrice('GBP', 'USD'), display: 'GBP/USD', config: ASSET_CONFIGS.gbpusd, isOil: false, isDXY: false },
-        { file: 'btcusd', fetcher: () => fetchCryptoPrice('bitcoin'), display: 'BTC/USD', config: ASSET_CONFIGS.btcusd, isOil: false, isDXY: false },
-        { file: 'ethusd', fetcher: () => fetchCryptoPrice('ethereum'), display: 'ETH/USD', config: ASSET_CONFIGS.ethusd, isOil: false, isDXY: false },
-        { file: 'xauusd', fetcher: () => fetchMetalPrice('XAU'), display: 'XAUUSD (Gold)', config: ASSET_CONFIGS.xauusd, isOil: false, isDXY: false },
-        { file: 'xagusd', fetcher: () => fetchMetalPrice('XAG'), display: 'XAGUSD (Silver)', config: ASSET_CONFIGS.xagusd, isOil: false, isDXY: false },
-        { file: 'wtiusd', fetcher: fetchOilPrice, display: 'WTI Oil', config: ASSET_CONFIGS.wtiusd, isOil: true, isDXY: false },
-        { file: 'dxy', fetcher: fetchDXYPrice, display: 'DXY', config: ASSET_CONFIGS.dxy, isOil: false, isDXY: true }
+        { file: 'eurusd', fetcher: () => fetchForexPrice('EUR', 'USD'), display: 'EUR/USD', config: ASSET_CONFIGS.eurusd, isOil: false, isDXY: false, isMetal: false },
+        { file: 'gbpusd', fetcher: () => fetchForexPrice('GBP', 'USD'), display: 'GBP/USD', config: ASSET_CONFIGS.gbpusd, isOil: false, isDXY: false, isMetal: false },
+        { file: 'btcusd', fetcher: () => fetchCryptoPrice('bitcoin'), display: 'BTC/USD', config: ASSET_CONFIGS.btcusd, isOil: false, isDXY: false, isMetal: false },
+        { file: 'ethusd', fetcher: () => fetchCryptoPrice('ethereum'), display: 'ETH/USD', config: ASSET_CONFIGS.ethusd, isOil: false, isDXY: false, isMetal: false },
+        { file: 'xauusd', fetcher: () => fetchMetalPrice('XAU'), display: 'XAUUSD (Gold)', config: ASSET_CONFIGS.xauusd, isOil: false, isDXY: false, isMetal: true, metalName: 'xau' },
+        { file: 'xagusd', fetcher: () => fetchMetalPrice('XAG'), display: 'XAGUSD (Silver)', config: ASSET_CONFIGS.xagusd, isOil: false, isDXY: false, isMetal: true, metalName: 'xag' },
+        { file: 'wtiusd', fetcher: fetchOilPrice, display: 'WTI Oil', config: ASSET_CONFIGS.wtiusd, isOil: true, isDXY: false, isMetal: false },
+        { file: 'dxy', fetcher: fetchDXYPrice, display: 'DXY', config: ASSET_CONFIGS.dxy, isOil: false, isDXY: true, isMetal: false }
     ];
     
     for (const asset of assets) {
-        await processAsset(asset.file, asset.fetcher, asset.display, asset.config, asset.isOil, asset.isDXY);
+        await processAsset(asset.file, asset.fetcher, asset.display, asset.config, asset.isOil, asset.isDXY, asset.isMetal, asset.metalName);
         await new Promise(r => setTimeout(r, 500));
     }
     console.log('--- Completed ---');
