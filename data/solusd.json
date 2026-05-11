@@ -1,6 +1,6 @@
 {
-  "currentPrice": 97.5,
-  "timestamp": 1778534861293,
+  "currentPrice": 97.57,
+  "timestamp": 1778535051385,
   "history": [
     97.89,
     97.85,
@@ -41,7 +41,8 @@
     97.51,
     97.48,
     97.58,
-    97.5
+    97.5,
+    97.57
   ],
   "source": "5min candle"
 }
