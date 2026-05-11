@@ -436,7 +436,7 @@ async function main() {
     
     for (const asset of assets) {
         await processAsset(asset.file, asset.fetcher, asset.display, asset.config, asset.isOil);
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 2000));
     }
     
     // Save DXY price to file (so website can read it)
