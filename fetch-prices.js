@@ -1,4 +1,4 @@
-// fetch-prices.js – v15.0 (Full Smart Money System: BOS/CHoCH, Order Blocks, OTE, Session Timing)
+// fetch-prices.js – v15.1 (Fixed 30-min cooldown, no duplicate alerts)
 
 const fs = require('fs');
 const path = require('path');
@@ -16,7 +16,9 @@ const DEFAULT_BALANCE = 7200;
 const DEFAULT_RISK_PERCENT = 1.0;
 const DEFAULT_MODE = 'scalp';
 
-// ========== COOLDOWN TRACKING AND OIL SKIP COUNTER ==========
+// ========== COOLDOWN TRACKING (30 minutes = 1800000 ms) ==========
+// This cache persists during a single workflow run
+// For multiple workflows, you need file-based cache
 const lastAlertCache = {};
 let oilRunCounter = 0;
 
@@ -325,8 +327,12 @@ function calculateTradeLevels(currentPrice, atr, support, resistance, signalBias
         const risk = entry - sl;
         tp1 = entry + risk;
         tp2 = entry + risk * targetRR;
-        if (tp2 > resistance) { tp2 = resistance * 0.998; rrRatio = (tp2 - entry) / risk; }
-        else rrRatio = targetRR;
+        if (tp2 > resistance) { 
+            tp2 = resistance * 0.998; 
+            rrRatio = (tp2 - entry) / risk; 
+        } else { 
+            rrRatio = targetRR; 
+        }
     } else if (signalBias === 'SELL') {
         entry = currentPrice;
         const atrMult = mode === 'scalp' ? 0.45 : 1.0;
@@ -336,8 +342,12 @@ function calculateTradeLevels(currentPrice, atr, support, resistance, signalBias
         const risk = sl - entry;
         tp1 = entry - risk;
         tp2 = entry - risk * targetRR;
-        if (tp2 < support) { tp2 = support * 1.002; rrRatio = (entry - tp2) / risk; }
-        else rrRatio = targetRR;
+        if (tp2 < support) { 
+            tp2 = support * 1.002; 
+            rrRatio = (entry - tp2) / risk; 
+        } else { 
+            rrRatio = targetRR; 
+        }
     } else return null;
     
     if (rrRatio < minRR) {
@@ -362,7 +372,7 @@ function calculateTradeLevels(currentPrice, atr, support, resistance, signalBias
     };
 }
 
-// ========== STRATEGY ENGINE (with smart money) ==========
+// ========== STRATEGY ENGINE ==========
 function analyzeSignal(prices, candles, assetClass) {
     if (prices.length < 50) {
         return { bias: 'WAIT', confidence: 30, reasons: ['Insufficient data'], rsi: 50, trend: 'SIDEWAYS', currentPrice: prices[prices.length-1] };
@@ -413,8 +423,8 @@ function analyzeSignal(prices, candles, assetClass) {
     // Market Structure (BOS/CHoCH)
     const marketStructure = detectMarketStructure(candles);
     if (marketStructure.bos) {
-        if (marketStructure.bos.direction === 'BULLISH') { buyScore += 15; reasons.push(`BOS found`); }
-        if (marketStructure.bos.direction === 'BEARISH') { sellScore += 15; reasons.push(`BOS found`); }
+        if (marketStructure.bos.direction === 'BULLISH') { buyScore += 15; reasons.push('BOS found'); }
+        if (marketStructure.bos.direction === 'BEARISH') { sellScore += 15; reasons.push('BOS found'); }
     }
     if (marketStructure.choch) {
         if (marketStructure.choch.direction === 'BULLISH_CHOCH') { buyScore += 20; reasons.push('CHoCH (bullish)'); }
@@ -430,8 +440,8 @@ function analyzeSignal(prices, candles, assetClass) {
     const recentHighs = Math.max(...prices.slice(-20));
     const recentLows = Math.min(...prices.slice(-20));
     const ote = calculateOTE(recentHighs, recentLows, currentPrice);
-    if (ote.bullish) { buyScore += 55; reasons.push('OTE (61.8-70.5%)'); }
-    if (ote.bearish) { sellScore += 55; reasons.push('OTE (38.2-50%)'); }
+    if (ote.bullish) { buyScore += 55; reasons.push('OTE (Fibonacci)'); }
+    if (ote.bearish) { sellScore += 55; reasons.push('OTE (Fibonacci)'); }
     
     // Liquidity Sweep
     const liquiditySweep = detectLiquiditySweep(candles);
@@ -456,6 +466,7 @@ function analyzeSignal(prices, candles, assetClass) {
     
     let bias = 'WAIT', confidence = 50;
     
+    // Threshold 85 (changed from 90)
     if (buyScore > 85 && buyScore > sellScore) {
         bias = 'BUY';
         confidence = Math.min(85, 50 + Math.floor(buyScore / 3));
@@ -468,16 +479,20 @@ function analyzeSignal(prices, candles, assetClass) {
     return { bias, confidence, reasons: uniqueReasons.slice(0,5), rsi, trend, currentPrice, ema20, ema50, atr, support, resistance };
 }
 
-// ========== TELEGRAM ALERT ==========
+// ========== TELEGRAM ALERT (WITH FIXED COOLDOWN) ==========
 async function sendTelegramAlert(symbolDisplay, signal, assetConfig) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
     
+    // ========== FIXED COOLDOWN CHECK (30 minutes) ==========
     const cacheKey = `${symbolDisplay}_${signal.bias}`;
     const lastAlert = lastAlertCache[cacheKey];
     const now = Date.now();
     
-    if (lastAlert && (now - lastAlert) < 1800000) {
-        console.log(`⏸️ Skipping duplicate ${signal.bias} for ${symbolDisplay} (cooldown active)`);
+    console.log(`🔍 Cooldown check for ${cacheKey}: last alert was ${lastAlert ? new Date(lastAlert).toLocaleTimeString() : 'never'}`);
+    
+    if (lastAlert && (now - lastAlert) < 1800000) { // 30 minutes
+        const minutesLeft = Math.round((1800000 - (now - lastAlert)) / 60000);
+        console.log(`⏸️ Skipping duplicate ${signal.bias} for ${symbolDisplay} (cooldown active, ${minutesLeft} min left)`);
         return false;
     }
     
@@ -529,8 +544,11 @@ ${icon} | ${signal.confidence}% confidence
         const json = await res.json();
         if (json.ok) {
             console.log(`✅ Telegram alert sent for ${symbolDisplay}`);
+            // Update cooldown cache AFTER successful send
             lastAlertCache[cacheKey] = now;
             return true;
+        } else {
+            console.error('Telegram error:', json.description);
         }
     } catch(e) { console.error('Telegram send error:', e.message); }
     return false;
@@ -633,7 +651,7 @@ async function processAsset(file, priceFetcher, displayName, assetConfig, isOil 
 
 // ========== MAIN EXECUTION ==========
 async function main() {
-    console.log('--- OMNI-SIGNAL v15.0 (Full Smart Money: BOS/CHoCH, Order Blocks, OTE) ---');
+    console.log('--- OMNI-SIGNAL v15.1 (Fixed 30-min cooldown, threshold 85) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
     console.log(`Alpha Vantage: ${!!ALPHA_VANTAGE_KEY ? '✅' : '❌'}`);
     console.log(`Mode: ${DEFAULT_MODE} | Balance: $${DEFAULT_BALANCE} | Risk: ${DEFAULT_RISK_PERCENT}%`);
