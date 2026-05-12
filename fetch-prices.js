@@ -1,4 +1,4 @@
-// fetch-prices.js – v15.1 (Fixed 30-min cooldown, no duplicate alerts)
+// fetch-prices.js – v17.0 (Institutional Order Flow Strategy)
 
 const fs = require('fs');
 const path = require('path');
@@ -16,9 +16,7 @@ const DEFAULT_BALANCE = 7200;
 const DEFAULT_RISK_PERCENT = 1.0;
 const DEFAULT_MODE = 'scalp';
 
-// ========== COOLDOWN TRACKING (30 minutes = 1800000 ms) ==========
-// This cache persists during a single workflow run
-// For multiple workflows, you need file-based cache
+// ========== COOLDOWN TRACKING (30 minutes) ==========
 const lastAlertCache = {};
 let oilRunCounter = 0;
 
@@ -83,7 +81,7 @@ async function fetchSilverPrice() {
     throw new Error('Invalid silver price response');
 }
 
-// ========== OIL (with skip counter) ==========
+// ========== OIL ==========
 let lastOilPrice = null;
 let lastOilFetchTime = 0;
 
@@ -183,18 +181,79 @@ function getCurrentSession() {
     if (utcHour >= 7 && utcHour < 16) return 'LONDON';
     if (utcHour >= 12 && utcHour < 20) return 'NEW_YORK';
     if (utcHour >= 23 || utcHour < 8) return 'TOKYO';
-    if (utcHour >= 0 && utcHour < 7) return 'ASIAN';
     return 'OFF_HOURS';
 }
 
-// ========== MARKET STRUCTURE (BOS/CHoCH) ==========
+// ========== STEP 1: SUPPLY & DEMAND ZONES ==========
+function findSupplyDemandZones(candles) {
+    if (!candles || candles.length < 50) return { supplyZones: [], demandZones: [] };
+    
+    const supplyZones = [];
+    const demandZones = [];
+    
+    // Find swing highs (potential supply)
+    for (let i = 10; i < candles.length - 10; i++) {
+        const isSwingHigh = candles[i].high > candles[i-1].high && candles[i].high > candles[i-2].high &&
+                            candles[i].high > candles[i+1].high && candles[i].high > candles[i+2].high;
+        if (isSwingHigh) {
+            supplyZones.push(candles[i].high);
+        }
+        
+        const isSwingLow = candles[i].low < candles[i-1].low && candles[i].low < candles[i-2].low &&
+                           candles[i].low < candles[i+1].low && candles[i].low < candles[i+2].low;
+        if (isSwingLow) {
+            demandZones.push(candles[i].low);
+        }
+    }
+    
+    // Find clusters (areas with multiple touches)
+    const supplyClusters = [];
+    const demandClusters = [];
+    
+    for (const price of supplyZones) {
+        let cluster = supplyClusters.find(c => Math.abs(c.price - price) / price < 0.002);
+        if (cluster) cluster.count++;
+        else supplyClusters.push({ price, count: 1 });
+    }
+    
+    for (const price of demandZones) {
+        let cluster = demandClusters.find(c => Math.abs(c.price - price) / price < 0.002);
+        if (cluster) cluster.count++;
+        else demandClusters.push({ price, count: 1 });
+    }
+    
+    return {
+        supplyZones: supplyClusters.filter(z => z.count >= 2).map(z => z.price),
+        demandZones: demandClusters.filter(z => z.count >= 2).map(z => z.price)
+    };
+}
+
+function isAtSupplyZone(currentPrice, supplyZones) {
+    for (const zone of supplyZones) {
+        if (Math.abs(currentPrice - zone) / currentPrice < 0.002) {
+            return { isAtZone: true, zone, type: 'SUPPLY' };
+        }
+    }
+    return { isAtZone: false };
+}
+
+function isAtDemandZone(currentPrice, demandZones) {
+    for (const zone of demandZones) {
+        if (Math.abs(currentPrice - zone) / currentPrice < 0.002) {
+            return { isAtZone: true, zone, type: 'DEMAND' };
+        }
+    }
+    return { isAtZone: false };
+}
+
+// ========== STEP 2: MARKET STRUCTURE (BOS/CHoCH) ==========
 function detectMarketStructure(candles) {
-    if (!candles || candles.length < 20) return { structure: 'UNKNOWN', bos: null, choch: null };
+    if (!candles || candles.length < 30) return { structure: 'UNKNOWN', bos: null, choch: null };
     
     const swingHighs = [];
     const swingLows = [];
     
-    for (let i = 5; i < candles.length - 5; i++) {
+    for (let i = 10; i < candles.length - 10; i++) {
         const isSwingHigh = candles[i].high > candles[i-1].high && candles[i].high > candles[i-2].high &&
                             candles[i].high > candles[i+1].high && candles[i].high > candles[i+2].high;
         const isSwingLow = candles[i].low < candles[i-1].low && candles[i].low < candles[i-2].low &&
@@ -211,77 +270,51 @@ function detectMarketStructure(candles) {
     const lastSwingLow = swingLows[swingLows.length - 1];
     const prevSwingLow = swingLows[swingLows.length - 2];
     
-    let bos = null;
-    let choch = null;
+    let bosDirection = null;
+    let chochDirection = null;
     
-    if (lastSwingHigh.price > prevSwingHigh.price) bos = { direction: 'BULLISH', price: lastSwingHigh.price };
-    if (lastSwingLow.price < prevSwingLow.price) bos = { direction: 'BEARISH', price: lastSwingLow.price };
+    if (lastSwingHigh.price > prevSwingHigh.price) bosDirection = 'BULLISH';
+    if (lastSwingLow.price < prevSwingLow.price) bosDirection = 'BEARISH';
     
     const lastCandle = candles[candles.length - 1];
-    if (bos && bos.direction === 'BULLISH' && lastCandle.close > prevSwingHigh.price) {
-        choch = { direction: 'BULLISH_CHOCH', price: lastCandle.close };
+    if (bosDirection === 'BULLISH' && lastCandle.close > prevSwingHigh.price) {
+        chochDirection = 'BULLISH';
     }
-    if (bos && bos.direction === 'BEARISH' && lastCandle.close < prevSwingLow.price) {
-        choch = { direction: 'BEARISH_CHOCH', price: lastCandle.close };
+    if (bosDirection === 'BEARISH' && lastCandle.close < prevSwingLow.price) {
+        chochDirection = 'BEARISH';
     }
     
-    return { structure: bos ? (bos.direction === 'BULLISH' ? 'UPTREND' : 'DOWNTREND') : 'CONSOLIDATION', bos, choch };
+    return { structure: bosDirection === 'BULLISH' ? 'UPTREND' : (bosDirection === 'BEARISH' ? 'DOWNTREND' : 'CONSOLIDATION'), bos: bosDirection, choch: chochDirection };
 }
 
-// ========== ORDER BLOCKS ==========
+// ========== STEP 3: ORDER BLOCK ==========
 function detectOrderBlock(candles) {
-    if (!candles || candles.length < 3) return { signal: null, strength: 0 };
-    
-    const lastCandle = candles[candles.length - 1];
-    const prevCandle = candles[candles.length - 2];
-    
-    const isBullishOB = prevCandle.close < prevCandle.open && 
-                        lastCandle.close > lastCandle.open && 
-                        lastCandle.close > prevCandle.high;
-    
-    const isBearishOB = prevCandle.close > prevCandle.open && 
-                        lastCandle.close < lastCandle.open && 
-                        lastCandle.close < prevCandle.low;
-    
-    if (isBullishOB) return { signal: 'BUY', strength: 72, reason: 'Order Block (bullish)' };
-    if (isBearishOB) return { signal: 'SELL', strength: 72, reason: 'Order Block (bearish)' };
-    return { signal: null, strength: 0 };
-}
-
-// ========== OPTIMAL TRADE ENTRY (OTE) ==========
-function calculateOTE(swingHigh, swingLow, currentPrice) {
-    const range = swingHigh - swingLow;
-    const fib618 = swingLow + range * 0.618;
-    const fib705 = swingLow + range * 0.705;
-    const fib382 = swingHigh - range * 0.382;
-    const fib50 = swingHigh - range * 0.5;
-    
-    const isBullishOTE = currentPrice >= fib618 && currentPrice <= fib705;
-    const isBearishOTE = currentPrice <= fib382 && currentPrice >= fib50;
-    
-    return { bullish: isBullishOTE, bearish: isBearishOTE };
-}
-
-// ========== LIQUIDITY SWEEP ==========
-function detectLiquiditySweep(candles) {
     if (!candles || candles.length < 5) return { signal: null, strength: 0 };
     
     const lastCandle = candles[candles.length - 1];
     const prevCandle = candles[candles.length - 2];
-    const recentHighs = Math.max(...candles.slice(-20).map(c => c.high));
-    const recentLows = Math.min(...candles.slice(-20).map(c => c.low));
+    const prevPrevCandle = candles[candles.length - 3];
     
-    const upperSweep = lastCandle.high > recentHighs && lastCandle.close < recentHighs && lastCandle.close > prevCandle.close;
-    const lowerSweep = lastCandle.low < recentLows && lastCandle.close > recentLows && lastCandle.close < prevCandle.close;
+    // Bullish Order Block: Strong bullish candle after a bearish candle
+    const isBullishOB = prevCandle.close < prevCandle.open && 
+                        lastCandle.close > lastCandle.open && 
+                        lastCandle.close > prevCandle.high &&
+                        lastCandle.close > prevPrevCandle.close;
     
-    if (lowerSweep) return { signal: 'BUY', strength: 70, reason: 'Liquidity sweep (bullish reversal)' };
-    if (upperSweep) return { signal: 'SELL', strength: 70, reason: 'Liquidity sweep (bearish reversal)' };
-    return { signal: null, strength: 0 };
+    // Bearish Order Block: Strong bearish candle after a bullish candle
+    const isBearishOB = prevCandle.close > prevCandle.open && 
+                        lastCandle.close < lastCandle.open && 
+                        lastCandle.close < prevCandle.low &&
+                        lastCandle.close < prevPrevCandle.close;
+    
+    if (isBullishOB) return { direction: 'BULLISH', strength: 15, reason: 'Order Block (bullish)' };
+    if (isBearishOB) return { direction: 'BEARISH', strength: 15, reason: 'Order Block (bearish)' };
+    return { direction: null, strength: 0 };
 }
 
-// ========== FAIR VALUE GAP ==========
+// ========== STEP 4: FAIR VALUE GAP ==========
 function detectFVG(candles) {
-    if (!candles || candles.length < 3) return { signal: null, strength: 0 };
+    if (!candles || candles.length < 3) return { direction: null, strength: 0 };
     
     const c1 = candles[candles.length - 3];
     const c2 = candles[candles.length - 2];
@@ -290,71 +323,115 @@ function detectFVG(candles) {
     const bullishFVG = c1.high < c3.low && c2.close > c1.high;
     const bearishFVG = c3.high < c1.low && c2.close < c1.low;
     
-    if (bullishFVG) return { signal: 'BUY', strength: 65, reason: 'Fair Value Gap (bullish)' };
-    if (bearishFVG) return { signal: 'SELL', strength: 65, reason: 'Fair Value Gap (bearish)' };
-    return { signal: null, strength: 0 };
+    if (bullishFVG) return { direction: 'BULLISH', strength: 10, reason: 'Fair Value Gap' };
+    if (bearishFVG) return { direction: 'BEARISH', strength: 10, reason: 'Fair Value Gap' };
+    return { direction: null, strength: 0 };
 }
 
-// ========== BREAK & RETEST ==========
-function detectBreakRetest(candles, currentPrice, support, resistance) {
+// ========== STEP 5: LIQUIDITY SWEEP (Candlestick Confirmation) ==========
+function detectLiquiditySweep(candles) {
+    if (!candles || candles.length < 10) return { direction: null, strength: 0 };
+    
+    const lastCandle = candles[candles.length - 1];
+    const recentHighs = Math.max(...candles.slice(-20).map(c => c.high));
+    const recentLows = Math.min(...candles.slice(-20).map(c => c.low));
+    
+    // Bullish: Price swept below recent low, then closed above it (stop hunt)
+    const bullishSweep = lastCandle.low < recentLows && lastCandle.close > recentLows && lastCandle.close > lastCandle.open;
+    
+    // Bearish: Price swept above recent high, then closed below it (stop hunt)
+    const bearishSweep = lastCandle.high > recentHighs && lastCandle.close < recentHighs && lastCandle.close < lastCandle.open;
+    
+    if (bullishSweep) return { direction: 'BULLISH', strength: 25, reason: 'Liquidity sweep (bullish)' };
+    if (bearishSweep) return { direction: 'BEARISH', strength: 25, reason: 'Liquidity sweep (bearish)' };
+    return { direction: null, strength: 0 };
+}
+
+// ========== STEP 6: RETEST / BREAK CONFIRMATION ==========
+function detectRetestBreak(candles, currentPrice, zone, zoneType) {
     if (!candles || candles.length < 5) return { signal: null, strength: 0 };
     
-    const recentCandles = candles.slice(-5);
-    const brokeResistance = recentCandles.some(c => c.close > resistance);
-    const retestedResistance = Math.abs(currentPrice - resistance) / currentPrice * 100 < 0.1;
-    const brokeSupport = recentCandles.some(c => c.close < support);
-    const retestedSupport = Math.abs(currentPrice - support) / currentPrice * 100 < 0.1;
+    const recentCandles = candles.slice(-10);
     
-    if (brokeResistance && retestedResistance) return { signal: 'BUY', strength: 60, reason: 'Break & retest (resistance)' };
-    if (brokeSupport && retestedSupport) return { signal: 'SELL', strength: 60, reason: 'Break & retest (support)' };
-    return { signal: null, strength: 0 };
+    if (zoneType === 'SUPPLY') {
+        // Price broke above supply, now retesting
+        const brokeResistance = recentCandles.some(c => c.close > zone);
+        const retested = Math.abs(currentPrice - zone) / currentPrice < 0.001;
+        
+        if (brokeResistance && retested) {
+            return { direction: 'BULLISH', strength: 15, reason: 'Break & retest (supply becomes support)' };
+        }
+    }
+    
+    if (zoneType === 'DEMAND') {
+        // Price broke below demand, now retesting
+        const brokeSupport = recentCandles.some(c => c.close < zone);
+        const retested = Math.abs(currentPrice - zone) / currentPrice < 0.001;
+        
+        if (brokeSupport && retested) {
+            return { direction: 'BEARISH', strength: 15, reason: 'Break & retest (demand becomes resistance)' };
+        }
+    }
+    
+    return { direction: null, strength: 0 };
+}
+
+// ========== STEP 7: CANDLESTICK PATTERNS ==========
+function detectCandlePatterns(candle) {
+    const body = Math.abs(candle.close - candle.open);
+    const range = candle.high - candle.low;
+    const upperWick = candle.high - Math.max(candle.open, candle.close);
+    const lowerWick = Math.min(candle.open, candle.close) - candle.low;
+    
+    // Bullish Hammer: Long lower wick, small body at top
+    const hammer = lowerWick > body * 2 && upperWick < body && candle.close > candle.open;
+    
+    // Bearish Shooting Star: Long upper wick, small body at bottom
+    const shootingStar = upperWick > body * 2 && lowerWick < body && candle.close < candle.open;
+    
+    if (hammer) return { direction: 'BULLISH', strength: 15, reason: 'Hammer candle' };
+    if (shootingStar) return { direction: 'BEARISH', strength: 15, reason: 'Shooting star candle' };
+    
+    return { direction: null, strength: 0 };
 }
 
 // ========== RISK MANAGER ==========
-function calculateTradeLevels(currentPrice, atr, support, resistance, signalBias, confidence, mode, multiplier, spread, digits) {
+function calculateTradeLevels(currentPrice, atr, zone, zoneType, direction, confidence, mode, multiplier, spread, digits) {
     let entry, sl, tp1, tp2, rrRatio = 0;
     
     const minRR = mode === 'scalp' ? 2.0 : 4.0;
     const maxRR = mode === 'scalp' ? 4.0 : 12.0;
     const targetRR = Math.min(minRR + (confidence / 100) * 3, maxRR);
     
-    if (signalBias === 'BUY') {
+    if (direction === 'BUY') {
         entry = currentPrice;
         const atrMult = mode === 'scalp' ? 0.45 : 1.0;
         let slDist = atr * atrMult;
         sl = entry - slDist;
-        if (sl > support) sl = support * 0.998;
+        
+        // Place stop below demand zone
+        if (zoneType === 'DEMAND' && sl > zone) sl = zone * 0.998;
+        
         const risk = entry - sl;
         tp1 = entry + risk;
         tp2 = entry + risk * targetRR;
-        if (tp2 > resistance) { 
-            tp2 = resistance * 0.998; 
-            rrRatio = (tp2 - entry) / risk; 
-        } else { 
-            rrRatio = targetRR; 
-        }
-    } else if (signalBias === 'SELL') {
+        rrRatio = targetRR;
+        
+    } else if (direction === 'SELL') {
         entry = currentPrice;
         const atrMult = mode === 'scalp' ? 0.45 : 1.0;
         let slDist = atr * atrMult;
         sl = entry + slDist;
-        if (sl < resistance) sl = resistance * 1.002;
+        
+        // Place stop above supply zone
+        if (zoneType === 'SUPPLY' && sl < zone) sl = zone * 1.002;
+        
         const risk = sl - entry;
         tp1 = entry - risk;
         tp2 = entry - risk * targetRR;
-        if (tp2 < support) { 
-            tp2 = support * 1.002; 
-            rrRatio = (entry - tp2) / risk; 
-        } else { 
-            rrRatio = targetRR; 
-        }
+        rrRatio = targetRR;
+        
     } else return null;
-    
-    if (rrRatio < minRR) {
-        rrRatio = minRR;
-        if (signalBias === 'BUY') tp2 = entry + (entry - sl) * minRR;
-        else tp2 = entry - (sl - entry) * minRR;
-    }
     
     const riskAmount = DEFAULT_BALANCE * (DEFAULT_RISK_PERCENT / 100);
     const stopDist = Math.abs(entry - sl) + spread;
@@ -372,135 +449,165 @@ function calculateTradeLevels(currentPrice, atr, support, resistance, signalBias
     };
 }
 
-// ========== STRATEGY ENGINE ==========
+// ========== MAIN STRATEGY (Institutional Order Flow) ==========
 function analyzeSignal(prices, candles, assetClass) {
+    // Minimum data requirement
     if (prices.length < 50) {
-        return { bias: 'WAIT', confidence: 30, reasons: ['Insufficient data'], rsi: 50, trend: 'SIDEWAYS', currentPrice: prices[prices.length-1] };
+        return { bias: 'WAIT', confidence: 30, reasons: ['Building data (need 50 candles)'], rsi: 50, trend: 'SIDEWAYS', currentPrice: prices[prices.length-1] };
     }
+    
     const currentPrice = prices[prices.length-1];
     const rsi = calcRSI(prices);
     const ema20 = calcEMA(prices, 20);
     const ema50 = calcEMA(prices, 50);
-    const ema200 = calcEMA(prices, 200);
     const atr = calcATR(prices, 14);
-    const support = Math.min(...prices.slice(-50)) * 0.998;
-    const resistance = Math.max(...prices.slice(-50)) * 1.002;
+    
+    // Trend detection
     let trend = 'SIDEWAYS';
-    if (ema20 > ema50 && ema50 > ema200) trend = 'BULLISH';
-    if (ema20 < ema50 && ema50 < ema200) trend = 'BEARISH';
-    const isChoppy = Math.abs(ema20 - ema50) / currentPrice < 0.001;
-    if (isChoppy) {
-        return { bias: 'WAIT', confidence: 35, reasons: ['Market choppy'], rsi, trend, currentPrice, atr, support, resistance };
+    if (ema20 > ema50 && ema20 > ema20 * 1.001) trend = 'BULLISH';
+    if (ema20 < ema50 && ema20 < ema20 * 0.999) trend = 'BEARISH';
+    
+    // ========== STEP 1: FIND S&D ZONES ==========
+    const { supplyZones, demandZones } = findSupplyDemandZones(candles);
+    const atSupply = isAtSupplyZone(currentPrice, supplyZones);
+    const atDemand = isAtDemandZone(currentPrice, demandZones);
+    
+    // If not at a key zone, WAIT
+    if (!atSupply.isAtZone && !atDemand.isAtZone) {
+        return { bias: 'WAIT', confidence: 30, reasons: ['Not at key supply/demand zone'], rsi, trend, currentPrice, atr };
     }
     
-    let buyScore = 0, sellScore = 0, reasons = [];
+    const zone = atSupply.isAtZone ? atSupply.zone : atDemand.zone;
+    const zoneType = atSupply.isAtZone ? 'SUPPLY' : 'DEMAND';
+    const expectedDirection = zoneType === 'SUPPLY' ? 'SELL' : 'BUY';
     
-    // RSI Divergence
-    if (prices.length >= 2) {
-        const prevPrice = prices[prices.length-2];
-        const priceHigher = currentPrice > prevPrice;
-        const rsiHigher = rsi > 60;
-        if (!priceHigher && rsiHigher) { buyScore += 85; reasons.push('Bullish RSI divergence'); }
-        else if (priceHigher && !rsiHigher) { sellScore += 85; reasons.push('Bearish RSI divergence'); }
-    }
-    
-    // EMA Pullback
-    const dist = Math.abs(currentPrice - ema20) / currentPrice * 100;
-    if (trend === 'BULLISH' && currentPrice < ema20 && currentPrice > ema50 && dist < 0.3) { buyScore += 75; reasons.push('Bullish EMA pullback'); }
-    else if (trend === 'BEARISH' && currentPrice > ema20 && currentPrice < ema50 && dist < 0.3) { sellScore += 75; reasons.push('Bearish EMA pullback'); }
-    
-    // Support/Resistance Bounce
-    const atrPerc = atr / currentPrice * 100;
-    const nearSupport = Math.abs(currentPrice - support) / currentPrice * 100 < atrPerc * 0.5;
-    const nearResistance = Math.abs(currentPrice - resistance) / currentPrice * 100 < atrPerc * 0.5;
-    if (nearSupport && rsi < 50) { buyScore += 80; reasons.push('Bounce from support'); }
-    else if (nearResistance && rsi > 50) { sellScore += 80; reasons.push('Rejection from resistance'); }
-    
-    // Trend alignment
-    if (trend === 'BULLISH') buyScore += 15;
-    if (trend === 'BEARISH') sellScore += 15;
-    
-    // Market Structure (BOS/CHoCH)
+    // ========== STEP 2: MARKET STRUCTURE ==========
     const marketStructure = detectMarketStructure(candles);
-    if (marketStructure.bos) {
-        if (marketStructure.bos.direction === 'BULLISH') { buyScore += 15; reasons.push('BOS found'); }
-        if (marketStructure.bos.direction === 'BEARISH') { sellScore += 15; reasons.push('BOS found'); }
+    
+    // Structure must align with expected direction
+    let structureAligned = false;
+    if (expectedDirection === 'BUY' && (marketStructure.bos === 'BULLISH' || marketStructure.choch === 'BULLISH')) {
+        structureAligned = true;
     }
-    if (marketStructure.choch) {
-        if (marketStructure.choch.direction === 'BULLISH_CHOCH') { buyScore += 20; reasons.push('CHoCH (bullish)'); }
-        if (marketStructure.choch.direction === 'BEARISH_CHOCH') { sellScore += 20; reasons.push('CHoCH (bearish)'); }
+    if (expectedDirection === 'SELL' && (marketStructure.bos === 'BEARISH' || marketStructure.choch === 'BEARISH')) {
+        structureAligned = true;
     }
     
-    // Order Block
+    if (!structureAligned) {
+        return { bias: 'WAIT', confidence: 35, reasons: [`Structure not aligned for ${expectedDirection}`], rsi, trend, currentPrice, atr };
+    }
+    
+    // ========== STEP 3-7: INSTITUTIONAL FOOTPRINTS & CONFIRMATIONS ==========
+    let buyScore = 0, sellScore = 0;
+    const reasons = [];
+    
+    // Order Block (15 points)
     const orderBlock = detectOrderBlock(candles);
-    if (orderBlock.signal === 'BUY') { buyScore += 72; reasons.push(orderBlock.reason); }
-    if (orderBlock.signal === 'SELL') { sellScore += 72; reasons.push(orderBlock.reason); }
+    if (orderBlock.direction === 'BULLISH') { buyScore += orderBlock.strength; reasons.push(orderBlock.reason); }
+    if (orderBlock.direction === 'BEARISH') { sellScore += orderBlock.strength; reasons.push(orderBlock.reason); }
     
-    // OTE (Fibonacci)
-    const recentHighs = Math.max(...prices.slice(-20));
-    const recentLows = Math.min(...prices.slice(-20));
-    const ote = calculateOTE(recentHighs, recentLows, currentPrice);
-    if (ote.bullish) { buyScore += 55; reasons.push('OTE (Fibonacci)'); }
-    if (ote.bearish) { sellScore += 55; reasons.push('OTE (Fibonacci)'); }
-    
-    // Liquidity Sweep
-    const liquiditySweep = detectLiquiditySweep(candles);
-    if (liquiditySweep.signal === 'BUY') { buyScore += 70; reasons.push(liquiditySweep.reason); }
-    if (liquiditySweep.signal === 'SELL') { sellScore += 70; reasons.push(liquiditySweep.reason); }
-    
-    // FVG
+    // FVG (10 points)
     const fvg = detectFVG(candles);
-    if (fvg.signal === 'BUY') { buyScore += 65; reasons.push(fvg.reason); }
-    if (fvg.signal === 'SELL') { sellScore += 65; reasons.push(fvg.reason); }
+    if (fvg.direction === 'BULLISH') { buyScore += fvg.strength; reasons.push(fvg.reason); }
+    if (fvg.direction === 'BEARISH') { sellScore += fvg.strength; reasons.push(fvg.reason); }
     
-    // Break & Retest
-    const breakRetest = detectBreakRetest(candles, currentPrice, support, resistance);
-    if (breakRetest.signal === 'BUY') { buyScore += 60; reasons.push(breakRetest.reason); }
-    if (breakRetest.signal === 'SELL') { sellScore += 60; reasons.push(breakRetest.reason); }
+    // Liquidity Sweep (25 points) - REQUIRED
+    const liquiditySweep = detectLiquiditySweep(candles);
+    if (liquiditySweep.direction === 'BULLISH') { buyScore += liquiditySweep.strength; reasons.push(liquiditySweep.reason); }
+    if (liquiditySweep.direction === 'BEARISH') { sellScore += liquiditySweep.strength; reasons.push(liquiditySweep.reason); }
     
-    // Session bonus
+    // Retest/Break (15 points) - REQUIRED
+    const retestBreak = detectRetestBreak(candles, currentPrice, zone, zoneType);
+    if (retestBreak.direction === 'BULLISH') { buyScore += retestBreak.strength; reasons.push(retestBreak.reason); }
+    if (retestBreak.direction === 'BEARISH') { sellScore += retestBreak.strength; reasons.push(retestBreak.reason); }
+    
+    // Candlestick Pattern (15 points)
+    const lastCandle = candles[candles.length - 1];
+    const candlePattern = detectCandlePatterns(lastCandle);
+    if (candlePattern.direction === 'BULLISH') { buyScore += candlePattern.strength; reasons.push(candlePattern.reason); }
+    if (candlePattern.direction === 'BEARISH') { sellScore += candlePattern.strength; reasons.push(candlePattern.reason); }
+    
+    // Session bonus (10 points)
     const currentSession = getCurrentSession();
     const sessionBonus = (currentSession === 'LONDON' || currentSession === 'NEW_YORK') ? 10 : 0;
-    buyScore += sessionBonus;
-    sellScore += sessionBonus;
     
-    let bias = 'WAIT', confidence = 50;
+    // Apply session bonus to expected direction
+    if (expectedDirection === 'BUY') buyScore += sessionBonus;
+    else sellScore += sessionBonus;
     
-    // Threshold 85 (changed from 90)
-    if (buyScore > 85 && buyScore > sellScore) {
+    // ========== DETERMINE SIGNAL ==========
+    let bias = 'WAIT';
+    let confidence = 40;
+    let finalDirection = null;
+    
+    // Minimum score required: 50 points (liquidity sweep 25 + retest 15 + zone 10 + one more = 50+)
+    const minScore = 50;
+    
+    if (expectedDirection === 'BUY' && buyScore > minScore && buyScore > sellScore) {
         bias = 'BUY';
-        confidence = Math.min(85, 50 + Math.floor(buyScore / 3));
-    } else if (sellScore > 85 && sellScore > buyScore) {
+        finalDirection = 'BUY';
+        confidence = Math.min(85, 50 + Math.floor(buyScore / 2));
+    } else if (expectedDirection === 'SELL' && sellScore > minScore && sellScore > buyScore) {
         bias = 'SELL';
-        confidence = Math.min(85, 50 + Math.floor(sellScore / 3));
+        finalDirection = 'SELL';
+        confidence = Math.min(85, 50 + Math.floor(sellScore / 2));
+    }
+    
+    // Overbought/Oversold filter
+    if (bias === 'BUY' && rsi > 70) {
+        bias = 'WAIT';
+        confidence = 40;
+        reasons.push('RSI overbought (>70) - waiting for pullback');
+    }
+    if (bias === 'SELL' && rsi < 30) {
+        bias = 'WAIT';
+        confidence = 40;
+        reasons.push('RSI oversold (<30) - waiting for bounce');
+    }
+    
+    // Sideways penalty (reduce confidence by 10%)
+    if (trend === 'SIDEWAYS' && bias !== 'WAIT') {
+        confidence = Math.max(50, confidence - 10);
+        reasons.push('Sideways market - reduced confidence');
     }
     
     const uniqueReasons = [...new Set(reasons)];
-    return { bias, confidence, reasons: uniqueReasons.slice(0,5), rsi, trend, currentPrice, ema20, ema50, atr, support, resistance };
+    
+    return { 
+        bias, 
+        confidence, 
+        reasons: uniqueReasons.slice(0,5), 
+        rsi, 
+        trend, 
+        currentPrice, 
+        atr,
+        zone,
+        zoneType
+    };
 }
 
-// ========== TELEGRAM ALERT (WITH FIXED COOLDOWN) ==========
+// ========== TELEGRAM ALERT ==========
 async function sendTelegramAlert(symbolDisplay, signal, assetConfig) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
     
-    // ========== FIXED COOLDOWN CHECK (30 minutes) ==========
     const cacheKey = `${symbolDisplay}_${signal.bias}`;
     const lastAlert = lastAlertCache[cacheKey];
     const now = Date.now();
     
-    console.log(`🔍 Cooldown check for ${cacheKey}: last alert was ${lastAlert ? new Date(lastAlert).toLocaleTimeString() : 'never'}`);
-    
     if (lastAlert && (now - lastAlert) < 1800000) { // 30 minutes
         const minutesLeft = Math.round((1800000 - (now - lastAlert)) / 60000);
-        console.log(`⏸️ Skipping duplicate ${signal.bias} for ${symbolDisplay} (cooldown active, ${minutesLeft} min left)`);
+        console.log(`⏸️ Skipping duplicate ${signal.bias} for ${symbolDisplay} (${minutesLeft} min left)`);
         return false;
     }
     
     let tradeLevels = null;
     if (signal.bias !== 'WAIT') {
+        const direction = signal.bias;
+        const zoneType = signal.zoneType;
+        const zone = signal.zone;
+        
         tradeLevels = calculateTradeLevels(
-            signal.currentPrice, signal.atr, signal.support, signal.resistance,
-            signal.bias, signal.confidence, DEFAULT_MODE,
+            signal.currentPrice, signal.atr, zone, zoneType, direction, signal.confidence, DEFAULT_MODE,
             assetConfig.multiplier, assetConfig.spread, assetConfig.digits
         );
     }
@@ -519,6 +626,7 @@ ${icon} | ${signal.confidence}% confidence
 💰 Price: ${signal.currentPrice.toFixed(assetConfig.digits)}
 📈 RSI: ${signal.rsi.toFixed(1)} | Trend: ${signal.trend}
 📊 ATR: ${signal.atr.toFixed(assetConfig.digits === 5 ? 5 : 2)}
+📍 ${signal.zoneType} Zone: ${signal.zone?.toFixed(assetConfig.digits) || 'N/A'}
 
 ━━━━━━━━━━━━━━━━━━━
 💡 ${signal.reasons.slice(0,4).join(', ') || 'Signal detected'}
@@ -544,17 +652,14 @@ ${icon} | ${signal.confidence}% confidence
         const json = await res.json();
         if (json.ok) {
             console.log(`✅ Telegram alert sent for ${symbolDisplay}`);
-            // Update cooldown cache AFTER successful send
             lastAlertCache[cacheKey] = now;
             return true;
-        } else {
-            console.error('Telegram error:', json.description);
         }
     } catch(e) { console.error('Telegram send error:', e.message); }
     return false;
 }
 
-// ========== CANDLE BUILDER WITH OHLC STORAGE ==========
+// ========== CANDLE BUILDER ==========
 function loadCandleHistory(file) {
     const historyFile = path.join(dataDir, `${file}.json`);
     if (fs.existsSync(historyFile)) {
@@ -651,7 +756,7 @@ async function processAsset(file, priceFetcher, displayName, assetConfig, isOil 
 
 // ========== MAIN EXECUTION ==========
 async function main() {
-    console.log('--- OMNI-SIGNAL v15.1 (Fixed 30-min cooldown, threshold 85) ---');
+    console.log('--- OMNI-SIGNAL v17.0 (Institutional Order Flow Strategy) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
     console.log(`Alpha Vantage: ${!!ALPHA_VANTAGE_KEY ? '✅' : '❌'}`);
     console.log(`Mode: ${DEFAULT_MODE} | Balance: $${DEFAULT_BALANCE} | Risk: ${DEFAULT_RISK_PERCENT}%`);
