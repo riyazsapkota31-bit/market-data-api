@@ -1,5 +1,4 @@
-// fetch-prices.js – FINAL VERSION (v13.0)
-// All 14 assets | No Twelve Data | DXY calculated | All free APIs
+// fetch-prices.js – v13.5 (Threshold 90, 30-min cooldown, RR min 1:2, full trade setup)
 
 const fs = require('fs');
 const path = require('path');
@@ -17,21 +16,20 @@ const DEFAULT_BALANCE = 7200;
 const DEFAULT_RISK_PERCENT = 1.0;
 const DEFAULT_MODE = 'scalp';
 
+// ========== COOLDOWN TRACKING (30 minutes = 1800000 ms) ==========
+const lastAlertCache = {};
+
 // ========== XM STANDARD ACCOUNT SPREADS ==========
 const ASSET_CONFIGS = {
-    // Forex (6 pairs)
     eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex' },
     gbpusd: { multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex' },
     usdjpy: { multiplier: 100, spread: 0.03, digits: 3, class: 'forex' },
     usdcad: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex' },
     usdchf: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex' },
     usdsek: { multiplier: 10000, spread: 0.0003, digits: 5, class: 'forex' },
-    // Crypto (4 pairs)
     btcusd: { multiplier: 10, spread: 75.00, digits: 0, class: 'crypto' },
     ethusd: { multiplier: 10, spread: 6.00, digits: 0, class: 'crypto' },
     solusd: { multiplier: 10, spread: 0.50, digits: 2, class: 'crypto' },
-    xrpusd: { multiplier: 10, spread: 0.50, digits: 4, class: 'crypto' },
-    // Commodities
     xauusd: { multiplier: 100, spread: 0.040, digits: 2, class: 'commodities' },
     xagusd: { multiplier: 100, spread: 0.030, digits: 3, class: 'commodities' },
     wtiusd: { multiplier: 100, spread: 0.030, digits: 2, class: 'commodities' },
@@ -64,27 +62,22 @@ async function fetchForexPrice(base, quote) {
 async function fetchCryptoPrice(id) {
     const url = `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`;
     const data = await fetchJSON(url);
-    return data[id]?.usd;
+    if (!data[id]?.usd) throw new Error(`No price for ${id}`);
+    return data[id].usd;
 }
 
 // ========== GOLD & SILVER (gold-api.com – free, no key, live) ==========
 async function fetchGoldPrice() {
     const url = 'https://api.gold-api.com/price/XAU';
     const data = await fetchJSON(url);
-    if (data && data.price && data.price > 0) {
-        console.log(`✓ Gold price via gold-api.com: $${data.price}`);
-        return data.price;
-    }
+    if (data && data.price && data.price > 0) return data.price;
     throw new Error('Invalid gold price response');
 }
 
 async function fetchSilverPrice() {
     const url = 'https://api.gold-api.com/price/XAG';
     const data = await fetchJSON(url);
-    if (data && data.price && data.price > 0) {
-        console.log(`✓ Silver price via gold-api.com: $${data.price}`);
-        return data.price;
-    }
+    if (data && data.price && data.price > 0) return data.price;
     throw new Error('Invalid silver price response');
 }
 
@@ -120,7 +113,6 @@ async function fetchOilPrice() {
 
 // ========== DXY CALCULATION (from 6 forex pairs – zero API calls) ==========
 function calculateDXY(eurusd, usdjpy, gbpusd, usdcad, usdsek, usdchf) {
-    // Formula based on USD Index (DXY) weights
     return 50.14348112 *
         Math.pow(eurusd, -0.576) *
         Math.pow(usdjpy, 0.136) *
@@ -175,45 +167,62 @@ function calcATR(prices, period = 14) {
     return trSum / period;
 }
 
-// ========== RISK MANAGER ==========
+// ========== RISK MANAGER (with RR minimum 1:2 for scalp) ==========
 function calculateTradeLevels(currentPrice, atr, support, resistance, signalBias, confidence, mode, multiplier, spread, digits) {
     let entry, sl, tp1, tp2, rrRatio = 0;
+    
+    const minRR = mode === 'scalp' ? 2.0 : 4.0;  // CHANGED: 1.5 → 2.0
+    const maxRR = mode === 'scalp' ? 4.0 : 12.0;
+    const targetRR = Math.min(minRR + (confidence / 100) * 3, maxRR);
+    
     if (signalBias === 'BUY') {
         entry = currentPrice;
         const atrMult = mode === 'scalp' ? 0.45 : 1.0;
         let slDist = atr * atrMult;
         sl = entry - slDist;
         if (sl > support) sl = support * 0.998;
-        const minRR = mode === 'scalp' ? 1.5 : 4.0;
-        const maxRR = mode === 'scalp' ? 4.0 : 12.0;
-        const targetRR = Math.min(minRR + (confidence / 100) * 3, maxRR);
         const risk = entry - sl;
         tp1 = entry + risk;
         tp2 = entry + risk * targetRR;
-        if (tp2 > resistance) { tp2 = resistance * 0.998; rrRatio = (tp2 - entry) / risk; }
-        else rrRatio = targetRR;
+        if (tp2 > resistance) { 
+            tp2 = resistance * 0.998; 
+            rrRatio = (tp2 - entry) / risk; 
+        } else { 
+            rrRatio = targetRR; 
+        }
     } else if (signalBias === 'SELL') {
         entry = currentPrice;
         const atrMult = mode === 'scalp' ? 0.45 : 1.0;
         let slDist = atr * atrMult;
         sl = entry + slDist;
         if (sl < resistance) sl = resistance * 1.002;
-        const minRR = mode === 'scalp' ? 1.5 : 4.0;
-        const maxRR = mode === 'scalp' ? 4.0 : 12.0;
-        const targetRR = Math.min(minRR + (confidence / 100) * 3, maxRR);
         const risk = sl - entry;
         tp1 = entry - risk;
         tp2 = entry - risk * targetRR;
-        if (tp2 < support) { tp2 = support * 1.002; rrRatio = (entry - tp2) / risk; }
-        else rrRatio = targetRR;
+        if (tp2 < support) { 
+            tp2 = support * 1.002; 
+            rrRatio = (entry - tp2) / risk; 
+        } else { 
+            rrRatio = targetRR; 
+        }
     } else return null;
-    const minRRReq = mode === 'scalp' ? 1.5 : 4.0;
-    if (rrRatio < minRRReq) return null;
+    
+    // Force minimum RR if below threshold
+    if (rrRatio < minRR) {
+        rrRatio = minRR;
+        if (signalBias === 'BUY') {
+            tp2 = entry + (entry - sl) * minRR;
+        } else {
+            tp2 = entry - (sl - entry) * minRR;
+        }
+    }
+    
     const riskAmount = DEFAULT_BALANCE * (DEFAULT_RISK_PERCENT / 100);
     const stopDist = Math.abs(entry - sl) + spread;
     let lotSize = riskAmount / (stopDist * multiplier);
     lotSize = Math.floor(lotSize * 1000) / 1000;
     lotSize = Math.max(0.01, Math.min(lotSize, 50));
+    
     return {
         entry: entry.toFixed(digits),
         sl: sl.toFixed(digits),
@@ -224,7 +233,7 @@ function calculateTradeLevels(currentPrice, atr, support, resistance, signalBias
     };
 }
 
-// ========== STRATEGY ENGINE (threshold 100, choppy filter active) ==========
+// ========== STRATEGY ENGINE (THRESHOLD 90) ==========
 function analyzeSignal(prices, candleData, assetClass) {
     if (prices.length < 50) {
         return { bias: 'WAIT', confidence: 30, reasons: ['Insufficient data (need 50 candles)'], rsi: 50, trend: 'SIDEWAYS', currentPrice: prices[prices.length-1] };
@@ -262,15 +271,35 @@ function analyzeSignal(prices, candleData, assetClass) {
     else if (nearResistance && rsi > 50) { sellScore += 80; reasons.push('Rejection from resistance'); }
     if (trend === 'BULLISH') buyScore += 15;
     if (trend === 'BEARISH') sellScore += 15;
+    
     let bias = 'WAIT', confidence = 50;
-    if (buyScore > 80 && buyScore > sellScore) { bias = 'BUY'; confidence = Math.min(85, 50 + Math.floor(buyScore / 3)); }
-    else if (sellScore > 80 && sellScore > buyScore) { bias = 'SELL'; confidence = Math.min(85, 50 + Math.floor(sellScore / 3)); }
+    
+    // ========== THRESHOLD CHANGED FROM 100 TO 90 ==========
+    if (buyScore > 90 && buyScore > sellScore) {
+        bias = 'BUY';
+        confidence = Math.min(85, 50 + Math.floor(buyScore / 3));
+    } else if (sellScore > 90 && sellScore > buyScore) {
+        bias = 'SELL';
+        confidence = Math.min(85, 50 + Math.floor(sellScore / 3));
+    }
+    
     return { bias, confidence, reasons, rsi, trend, currentPrice, ema20, ema50, atr, support, resistance };
 }
 
-// ========== TELEGRAM ALERT ==========
+// ========== TELEGRAM ALERT (with full trade setup and cooldown) ==========
 async function sendTelegramAlert(symbolDisplay, signal, assetConfig) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
+    
+    // ========== 30-MINUTE COOLDOWN CHECK ==========
+    const cacheKey = `${symbolDisplay}_${signal.bias}`;
+    const lastAlert = lastAlertCache[cacheKey];
+    const now = Date.now();
+    
+    if (lastAlert && (now - lastAlert) < 1800000) { // 30 minutes
+        console.log(`⏸️ Skipping duplicate ${signal.bias} for ${symbolDisplay} (cooldown active)`);
+        return false;
+    }
+    
     let tradeLevels = null;
     if (signal.bias !== 'WAIT') {
         tradeLevels = calculateTradeLevels(
@@ -279,6 +308,7 @@ async function sendTelegramAlert(symbolDisplay, signal, assetConfig) {
             assetConfig.multiplier, assetConfig.spread, assetConfig.digits
         );
     }
+    
     const icon = signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL';
     const timestamp = new Date().toLocaleString();
     let message = `
@@ -305,15 +335,28 @@ ${icon} | ${signal.confidence}% confidence
 📐 Risk/Reward: 1:${tradeLevels.rrRatio}
 💰 Lot Size: ${tradeLevels.lotSize}
 `;
+    } else {
+        message += `
+━━━━━━━━━━━━━━━━━━━
+⚠️ Trade levels temporarily unavailable
+📥 Suggested Entry: ${signal.currentPrice.toFixed(assetConfig.digits)}
+🛑 Suggested SL: ${(signal.bias === 'BUY' ? signal.currentPrice - signal.atr * 0.45 : signal.currentPrice + signal.atr * 0.45).toFixed(assetConfig.digits)}
+`;
     }
     message += `\n⚠️ Mode: ${DEFAULT_MODE} | Risk: ${DEFAULT_RISK_PERCENT}% | Balance: $${DEFAULT_BALANCE}`;
+    
     try {
         const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: message, parse_mode: 'HTML' })
         });
         const json = await res.json();
-        if (json.ok) { console.log(`✅ Telegram alert sent for ${symbolDisplay}`); return true; }
+        if (json.ok) { 
+            console.log(`✅ Telegram alert sent for ${symbolDisplay}`);
+            // Update cooldown cache
+            lastAlertCache[cacheKey] = now;
+            return true; 
+        }
         else console.error('Telegram error:', json.description);
     } catch(e) { console.error('Telegram send error:', e.message); }
     return false;
@@ -392,7 +435,7 @@ async function processAsset(file, priceFetcher, displayName, assetConfig, isOil 
 
 // ========== MAIN EXECUTION ==========
 async function main() {
-    console.log('--- OMNI-SIGNAL v13.0 (Final: 14 assets, no Twelve Data, DXY calculated) ---');
+    console.log('--- OMNI-SIGNAL v13.5 (Threshold 90, 30-min cooldown, RR min 1:2) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
     console.log(`Alpha Vantage: ${!!ALPHA_VANTAGE_KEY ? '✅' : '❌'}`);
     console.log(`Mode: ${DEFAULT_MODE} | Balance: $${DEFAULT_BALANCE} | Risk: ${DEFAULT_RISK_PERCENT}%`);
@@ -428,7 +471,6 @@ async function main() {
         { file: 'btcusd', fetcher: () => fetchCryptoPrice('bitcoin'), display: 'BTC/USD', config: ASSET_CONFIGS.btcusd, isOil: false },
         { file: 'ethusd', fetcher: () => fetchCryptoPrice('ethereum'), display: 'ETH/USD', config: ASSET_CONFIGS.ethusd, isOil: false },
         { file: 'solusd', fetcher: () => fetchCryptoPrice('solana'), display: 'SOL/USD', config: ASSET_CONFIGS.solusd, isOil: false },
-        { file: 'xrpusd', fetcher: () => fetchCryptoPrice('ripple'), display: 'XRP/USD', config: ASSET_CONFIGS.xrpusd, isOil: false },
         { file: 'xauusd', fetcher: fetchGoldPrice, display: 'XAUUSD (Gold)', config: ASSET_CONFIGS.xauusd, isOil: false },
         { file: 'xagusd', fetcher: fetchSilverPrice, display: 'XAGUSD (Silver)', config: ASSET_CONFIGS.xagusd, isOil: false },
         { file: 'wtiusd', fetcher: fetchOilPrice, display: 'WTI Oil', config: ASSET_CONFIGS.wtiusd, isOil: true }
@@ -436,10 +478,10 @@ async function main() {
     
     for (const asset of assets) {
         await processAsset(asset.file, asset.fetcher, asset.display, asset.config, asset.isOil);
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 500));
     }
     
-    // Save DXY price to file (so website can read it)
+    // Save DXY price to file
     if (dxyPrice) {
         const dxyData = {
             currentPrice: dxyPrice,
