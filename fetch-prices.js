@@ -1,4 +1,4 @@
-// fetch-prices.js – v18.0 (HTF direction + LTF confirmation, 30-min cooldown)
+// fetch-prices.js – v20.0 (Hybrid: HTF zones OR (BOS + FVG/OB + liquidity sweep))
 
 const fs = require('fs');
 const path = require('path');
@@ -6,21 +6,17 @@ const path = require('path');
 const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
 
-// ========== GITHUB SECRETS ==========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const ALPHA_VANTAGE_KEY = process.env.ALPHA_VANTAGE_KEY;
 
-// ========== YOUR PERSONAL TRADING PARAMETERS ==========
 const DEFAULT_BALANCE = 7200;
 const DEFAULT_RISK_PERCENT = 1.0;
 const DEFAULT_MODE = 'scalp';
 
-// ========== COOLDOWN TRACKING ==========
 const lastAlertCache = {};
 let oilRunCounter = 0;
 
-// ========== XM SPREADS ==========
 const ASSET_CONFIGS = {
     eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex' },
     gbpusd: { multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex' },
@@ -165,7 +161,6 @@ function calcATR(prices, period = 14) {
     return trSum / period;
 }
 
-// ---------- SESSION ----------
 function getCurrentSession() {
     const now = new Date();
     const utcHour = now.getUTCHours();
@@ -188,9 +183,7 @@ function findHTFZones(candles) {
         if (isHigh) swingHighs.push(candles[i].high);
         if (isLow)  swingLows.push(candles[i].low);
     }
-    // cluster within 0.2%
-    const supply = [];
-    const demand = [];
+    const supply = [], demand = [];
     for (const h of swingHighs) {
         let found = supply.find(z => Math.abs(z.price - h) / h < 0.002);
         if (found) found.count++;
@@ -214,12 +207,11 @@ function isAtHTFZone(price, zones, type) {
     return { atZone: false };
 }
 
-// ========== LTF ZONES (50 candles, 0.1% cluster) ==========
+// ---------- LTF ZONES (50 candles, 0.1% cluster) ----------
 function findLTFZones(candles) {
     if (!candles || candles.length < 30) return { supply: [], demand: [] };
     const recent = candles.slice(-50);
-    const swingHighs = [];
-    const swingLows = [];
+    const swingHighs = [], swingLows = [];
     for (let i = 3; i < recent.length - 3; i++) {
         const isHigh = recent[i].high > recent[i-1].high && recent[i].high > recent[i-2].high &&
                        recent[i].high > recent[i+1].high && recent[i].high > recent[i+2].high;
@@ -308,7 +300,7 @@ function detectLiquiditySweep(candles) {
     return { direction: null };
 }
 
-// ---------- BREAK & RETEST ----------
+// ---------- BREAK & RETEST (using HTF zone) ----------
 function detectBreakRetest(candles, price, zone, zoneType) {
     if (candles.length < 5) return { direction: null };
     const recent = candles.slice(-5);
@@ -378,7 +370,7 @@ function calculateTradeLevels(price, atr, zone, zoneType, bias, conf, mode, mult
     };
 }
 
-// ========== MAIN STRATEGY ==========
+// ========== MAIN STRATEGY (Hybrid) ==========
 function analyzeSignal(prices, candles, assetClass) {
     if (prices.length < 50) {
         return { bias: 'WAIT', confidence: 30, reasons: ['Building data'], rsi: 50, trend: 'SIDEWAYS', currentPrice: prices[prices.length-1] };
@@ -393,115 +385,157 @@ function analyzeSignal(prices, candles, assetClass) {
     if (ema20 > ema50 && ema20 > ema20 * 1.001) trend = 'BULLISH';
     if (ema20 < ema50 && ema20 < ema20 * 0.999) trend = 'BEARISH';
 
-    // ---- HTF zones (direction) ----
+    // ---- Common data for both paths ----
+    const ltfZones = findLTFZones(candles);
+    const atLTFSupply = isAtHTFZone(curPrice, ltfZones.supply, 'SUPPLY');
+    const atLTFDemand = isAtHTFZone(curPrice, ltfZones.demand, 'DEMAND');
+    const ltfConfirm = (atLTFSupply.atZone || atLTFDemand.atZone);
+    const ms = detectMarketStructure(candles);
+    const ob = detectOrderBlock(candles);
+    const fvg = detectFVG(candles);
+    const sweep = detectLiquiditySweep(candles);
+    const candlePat = detectCandlePattern(candles[candles.length-1]);
+    const session = getCurrentSession();
+    const sessionBonus = (session === 'LONDON' || session === 'NEW_YORK') ? 10 : 0;
+
+    // ----- PATH A: HTF Zone-based -----
     const htfZones = findHTFZones(candles);
     const atHTFSupply = isAtHTFZone(curPrice, htfZones.supply, 'SUPPLY');
     const atHTFDemand = isAtHTFZone(curPrice, htfZones.demand, 'DEMAND');
+    const atZone = atHTFSupply.atZone || atHTFDemand.atZone;
+    const htfDirection = atHTFSupply.atZone ? 'SELL' : (atHTFDemand.atZone ? 'BUY' : null);
+    const htfZonePrice = atHTFSupply.atZone ? atHTFSupply.zone : (atHTFDemand.atZone ? atHTFDemand.zone : null);
+    const htfZoneType = atHTFSupply.atZone ? 'SUPPLY' : (atHTFDemand.atZone ? 'DEMAND' : null);
 
-    if (!atHTFSupply.atZone && !atHTFDemand.atZone) {
-        return { bias: 'WAIT', confidence: 30, reasons: ['Not at HTF zone'], rsi, trend, currentPrice: curPrice, atr };
-    }
-
-    const htfDirection = atHTFSupply.atZone ? 'SELL' : 'BUY';
-    const htfZonePrice = atHTFSupply.atZone ? atHTFSupply.zone : atHTFDemand.zone;
-    const htfZoneType = atHTFSupply.atZone ? 'SUPPLY' : 'DEMAND';
-
-    // ---- LTF zones (confirmation) ----
-    const ltfZones = findLTFZones(candles);
-    const atLTFSupply = isAtHTFZone(curPrice, ltfZones.supply, 'SUPPLY'); // reuse same helper
-    const atLTFDemand = isAtHTFZone(curPrice, ltfZones.demand, 'DEMAND');
-    const ltfConfirm = (atLTFSupply.atZone || atLTFDemand.atZone);
-
-    // ---- Market structure alignment ----
-    const ms = detectMarketStructure(candles);
+    // Structure alignment for HTF path
     let structureOk = false;
     if (htfDirection === 'BUY' && (ms.bos === 'BULLISH' || ms.choch === 'BULLISH')) structureOk = true;
     if (htfDirection === 'SELL' && (ms.bos === 'BEARISH' || ms.choch === 'BEARISH')) structureOk = true;
-    if (!structureOk) {
-        return { bias: 'WAIT', confidence: 35, reasons: ['Structure not aligned'], rsi, trend, currentPrice: curPrice, atr };
+
+    // Footprint and confirmation for HTF path
+    const hasFootprint = (ob.direction !== null || fvg.direction !== null);
+    const hasConfirmation = (sweep.direction !== null);   // liquidity sweep OR break/retest (we'll add break/retest later)
+
+    // ----- PATH B: Footprint-based (no HTF zone required) -----
+    // Requires: BOS + (FVG or OB) + liquidity sweep
+    const hasBOS = (ms.bos !== null);
+    const hasFVGorOB = (fvg.direction !== null || ob.direction !== null);
+    const hasSweep = (sweep.direction !== null);
+    const footprintPathValid = hasBOS && hasFVGorOB && hasSweep;
+
+    // Determine direction from footprint path if valid
+    let footprintDirection = null;
+    if (footprintPathValid) {
+        // Combine signals: if OB/FVG and sweep agree, use that direction
+        const bullishSignals = (ob.direction === 'BULLISH' ? 1 : 0) + (fvg.direction === 'BULLISH' ? 1 : 0) + (sweep.direction === 'BULLISH' ? 1 : 0);
+        const bearishSignals = (ob.direction === 'BEARISH' ? 1 : 0) + (fvg.direction === 'BEARISH' ? 1 : 0) + (sweep.direction === 'BEARISH' ? 1 : 0);
+        if (bullishSignals > bearishSignals) footprintDirection = 'BUY';
+        else if (bearishSignals > bullishSignals) footprintDirection = 'SELL';
     }
 
-    // ---- Score accumulation ----
-    let buyScore = 0, sellScore = 0;
-    const reasons = [];
+    // ----- Scoring function -----
+    function computeScore(direction, includeZoneBonus, zonePrice, zoneType) {
+        let score = 0;
+        const reasons = [];
 
-    // HTF zone base
-    if (htfDirection === 'BUY') buyScore += 30;
-    else sellScore += 30;
-    reasons.push(`${htfZoneType} zone (HTF)`);
+        // Base from direction
+        if (direction === 'BUY') {
+            score += 20;
+            reasons.push('Direction: BUY');
+        } else {
+            score += 20;
+            reasons.push('Direction: SELL');
+        }
 
-    // LTF zone confirmation
-    if (ltfConfirm && htfDirection === 'BUY') { buyScore += 10; reasons.push('LTF demand zone'); }
-    if (ltfConfirm && htfDirection === 'SELL') { sellScore += 10; reasons.push('LTF supply zone'); }
+        // LTF zone confirmation
+        if (ltfConfirm) {
+            score += 10;
+            reasons.push('LTF zone confirmation');
+        }
 
-    // Order Block
-    const ob = detectOrderBlock(candles);
-    if (ob.direction === 'BULLISH') { buyScore += ob.strength; reasons.push(ob.reason); }
-    if (ob.direction === 'BEARISH') { sellScore += ob.strength; reasons.push(ob.reason); }
+        // OB, FVG
+        if (ob.direction === direction) { score += ob.strength; reasons.push(ob.reason); }
+        if (fvg.direction === direction) { score += fvg.strength; reasons.push(fvg.reason); }
 
-    // FVG
-    const fvg = detectFVG(candles);
-    if (fvg.direction === 'BULLISH') { buyScore += fvg.strength; reasons.push(fvg.reason); }
-    if (fvg.direction === 'BEARISH') { sellScore += fvg.strength; reasons.push(fvg.reason); }
+        // Liquidity sweep
+        if (sweep.direction === direction) { score += sweep.strength; reasons.push(sweep.reason); }
 
-    // Liquidity sweep (important)
-    const sweep = detectLiquiditySweep(candles);
-    if (sweep.direction === 'BULLISH') { buyScore += sweep.strength; reasons.push(sweep.reason); }
-    if (sweep.direction === 'BEARISH') { sellScore += sweep.strength; reasons.push(sweep.reason); }
+        // Break & retest (only if we have a zone)
+        if (zonePrice && zoneType) {
+            const br = detectBreakRetest(candles, curPrice, zonePrice, zoneType);
+            if (br.direction === direction) { score += br.strength; reasons.push(br.reason); }
+        }
 
-    // Break & retest (using the HTF zone)
-    const br = detectBreakRetest(candles, curPrice, htfZonePrice, htfZoneType);
-    if (br.direction === 'BULLISH') { buyScore += br.strength; reasons.push(br.reason); }
-    if (br.direction === 'BEARISH') { sellScore += br.strength; reasons.push(br.reason); }
+        // Candlestick pattern
+        if (candlePat.direction === direction) { score += candlePat.strength; reasons.push(candlePat.reason); }
 
-    // Candlestick pattern
-    const candlePat = detectCandlePattern(candles[candles.length-1]);
-    if (candlePat.direction === 'BULLISH') { buyScore += candlePat.strength; reasons.push(candlePat.reason); }
-    if (candlePat.direction === 'BEARISH') { sellScore += candlePat.strength; reasons.push(candlePat.reason); }
+        // Session bonus
+        score += sessionBonus;
+        if (sessionBonus > 0) reasons.push(`${session} session`);
 
-    // Session bonus
-    const session = getCurrentSession();
-    const sessionBonus = (session === 'LONDON' || session === 'NEW_YORK') ? 10 : 0;
-    buyScore += sessionBonus;
-    sellScore += sessionBonus;
-    if (sessionBonus) reasons.push(`${session} session`);
+        return { score, reasons };
+    }
 
-    // Overbought/oversold filter
     let finalBias = 'WAIT';
-    let confidence = 40;
-    const minScore = 50;
+    let finalConfidence = 40;
+    let finalReasons = [];
+    let finalZone = null;
+    let finalZoneType = null;
 
-    if (htfDirection === 'BUY' && buyScore > minScore && buyScore > sellScore) finalBias = 'BUY';
-    else if (htfDirection === 'SELL' && sellScore > minScore && sellScore > buyScore) finalBias = 'SELL';
+    // Try Path A first (HTF zone)
+    if (atZone && htfDirection && structureOk && hasFootprint && hasSweep) {
+        const { score, reasons } = computeScore(htfDirection, true, htfZonePrice, htfZoneType);
+        if (score >= 50) {
+            finalBias = htfDirection;
+            finalConfidence = Math.min(85, 50 + Math.floor(score / 2));
+            finalReasons = reasons;
+            finalZone = htfZonePrice;
+            finalZoneType = htfZoneType;
+        }
+    }
 
-    if (finalBias === 'BUY' && rsi > 70) finalBias = 'WAIT';
-    if (finalBias === 'SELL' && rsi < 30) finalBias = 'WAIT';
+    // If Path A did not trigger, try Path B (footprint-based)
+    if (finalBias === 'WAIT' && footprintPathValid && footprintDirection) {
+        const { score, reasons } = computeScore(footprintDirection, false, null, null);
+        if (score >= 50) {
+            finalBias = footprintDirection;
+            finalConfidence = Math.min(85, 50 + Math.floor(score / 2));
+            finalReasons = reasons;
+            // For footprint path, use the sweep level as zone (optional)
+            finalZone = curPrice;
+            finalZoneType = 'FOOTPRINT';
+        }
+    }
 
+    // Final filters
     if (finalBias !== 'WAIT') {
-        confidence = Math.min(85, 50 + Math.floor((finalBias === 'BUY' ? buyScore : sellScore) / 2));
+        if (finalBias === 'BUY' && rsi > 70) finalBias = 'WAIT';
+        if (finalBias === 'SELL' && rsi < 30) finalBias = 'WAIT';
+    }
+    if (finalBias !== 'WAIT' && trend === 'SIDEWAYS') {
+        finalConfidence = Math.max(50, finalConfidence - 10);
+        finalReasons.push('Sideways market - reduced confidence');
     }
 
-    // Sideways penalty
-    if (trend === 'SIDEWAYS' && finalBias !== 'WAIT') {
-        confidence = Math.max(50, confidence - 10);
-        reasons.push('Sideways market - reduced confidence');
+    if (finalBias === 'WAIT') {
+        return { bias: 'WAIT', confidence: 35, reasons: ['No valid setup'], rsi, trend, currentPrice: curPrice, atr };
     }
 
-    const uniqueReasons = [...new Set(reasons)];
+    const uniqueReasons = [...new Set(finalReasons)];
     return {
         bias: finalBias,
-        confidence,
-        reasons: uniqueReasons.slice(0,5),
+        confidence: finalConfidence,
+        reasons: uniqueReasons.slice(0, 5),
         rsi,
         trend,
         currentPrice: curPrice,
         atr,
-        zone: htfZonePrice,
-        zoneType: htfZoneType
+        zone: finalZone,
+        zoneType: finalZoneType
     };
 }
 
-// ---------- TELEGRAM ALERT (with 30-min cooldown) ----------
+// ---------- TELEGRAM ALERT (30-min cooldown) ----------
 async function sendTelegramAlert(symbolDisplay, signal, assetConfig) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
     const cacheKey = `${symbolDisplay}_${signal.bias}`;
@@ -563,7 +597,7 @@ ${icon} | ${signal.confidence}% confidence
     return false;
 }
 
-// ---------- CANDLE BUILDER ----------
+// ---------- CANDLE BUILDER (unchanged) ----------
 function loadCandleHistory(file) {
     const f = path.join(dataDir, `${file}.json`);
     if (fs.existsSync(f)) {
@@ -650,12 +684,11 @@ async function processAsset(file, priceFetcher, displayName, assetConfig, isOil 
 
 // ---------- MAIN ----------
 async function main() {
-    console.log('--- OMNI-SIGNAL v18.0 (HTF direction + LTF confirmation) ---');
+    console.log('--- OMNI-SIGNAL v20.0 (Hybrid: HTF zones OR BOS+FVG/OB+sweep) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
     console.log(`Alpha Vantage: ${!!ALPHA_VANTAGE_KEY ? '✅' : '❌'}`);
     console.log(`Mode: ${DEFAULT_MODE} | Balance: $${DEFAULT_BALANCE} | Risk: ${DEFAULT_RISK_PERCENT}%`);
 
-    // Forex for DXY
     let eurusd, gbpusd, usdjpy, usdcad, usdchf, usdsek;
     try {
         eurusd = await fetchForexPrice('EUR', 'USD');
