@@ -263,8 +263,8 @@ function analyzeSignal(prices, candleData, assetClass) {
     if (trend === 'BULLISH') buyScore += 15;
     if (trend === 'BEARISH') sellScore += 15;
     let bias = 'WAIT', confidence = 50;
-    if (buyScore > 100 && buyScore > sellScore) { bias = 'BUY'; confidence = Math.min(85, 50 + Math.floor(buyScore / 3)); }
-    else if (sellScore > 100 && sellScore > buyScore) { bias = 'SELL'; confidence = Math.min(85, 50 + Math.floor(sellScore / 3)); }
+    if (buyScore > 80 && buyScore > sellScore) { bias = 'BUY'; confidence = Math.min(85, 50 + Math.floor(buyScore / 3)); }
+    else if (sellScore > 80 && sellScore > buyScore) { bias = 'SELL'; confidence = Math.min(85, 50 + Math.floor(sellScore / 3)); }
     return { bias, confidence, reasons, rsi, trend, currentPrice, ema20, ema50, atr, support, resistance };
 }
 
