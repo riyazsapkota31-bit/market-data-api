@@ -456,10 +456,10 @@ function analyzeSignal(prices, candles, assetClass) {
     
     let bias = 'WAIT', confidence = 50;
     
-    if (buyScore > 90 && buyScore > sellScore) {
+    if (buyScore > 85 && buyScore > sellScore) {
         bias = 'BUY';
         confidence = Math.min(85, 50 + Math.floor(buyScore / 3));
-    } else if (sellScore > 90 && sellScore > buyScore) {
+    } else if (sellScore > 85 && sellScore > buyScore) {
         bias = 'SELL';
         confidence = Math.min(85, 50 + Math.floor(sellScore / 3));
     }
