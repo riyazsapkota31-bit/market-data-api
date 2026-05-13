@@ -790,8 +790,15 @@
       "high": 80467,
       "low": 80442,
       "close": 80452
+    },
+    {
+      "timestamp": 1778630178831,
+      "open": 80466,
+      "high": 80466,
+      "low": 80452,
+      "close": 80452
     }
   ],
   "currentPrice": 80452,
-  "timestamp": 1778630178832
+  "timestamp": 1778630462267
 }
