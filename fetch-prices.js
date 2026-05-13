@@ -1,4 +1,4 @@
-// fetch-prices.js – v20.0 (Hybrid: HTF zones OR (BOS + FVG/OB + liquidity sweep))
+// fetch-prices.js – FINAL v6.0 (Threshold 55, dynamic RR, single TP, no sideways penalty)
 
 const fs = require('fs');
 const path = require('path');
@@ -33,7 +33,6 @@ const ASSET_CONFIGS = {
     dxy: { multiplier: 100, spread: 0.05, digits: 4, class: 'forex' }
 };
 
-// ---------- FETCHERS (unchanged) ----------
 async function fetchJSON(url, timeout = 10000, headers = {}) {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
@@ -116,32 +115,6 @@ function calculateDXY(eurusd, usdjpy, gbpusd, usdcad, usdsek, usdchf) {
         Math.pow(usdchf, 0.036);
 }
 
-// ---------- INDICATORS ----------
-function calcRSI(prices, period = 14) {
-    if (prices.length < period + 1) return 50;
-    let gains = 0, losses = 0;
-    for (let i = prices.length - period; i < prices.length - 1; i++) {
-        const diff = prices[i+1] - prices[i];
-        if (diff > 0) gains += diff;
-        else losses -= diff;
-    }
-    const avgGain = gains / period;
-    const avgLoss = losses / period;
-    if (avgLoss === 0) return 100;
-    const rs = avgGain / avgLoss;
-    return 100 - (100 / (1 + rs));
-}
-
-function calcEMA(prices, period) {
-    if (prices.length < period) return prices[prices.length-1];
-    const k = 2 / (period + 1);
-    let ema = prices.slice(0, period).reduce((a,b)=>a+b,0)/period;
-    for (let i = period; i < prices.length; i++) {
-        ema = prices[i] * k + ema * (1 - k);
-    }
-    return ema;
-}
-
 function calcATR(prices, period = 14) {
     if (prices.length < period + 1) {
         const recent = prices.slice(-period);
@@ -166,426 +139,243 @@ function getCurrentSession() {
     const utcHour = now.getUTCHours();
     if (utcHour >= 7 && utcHour < 16) return 'LONDON';
     if (utcHour >= 12 && utcHour < 20) return 'NEW_YORK';
-    if (utcHour >= 23 || utcHour < 8) return 'TOKYO';
     return 'OFF_HOURS';
 }
 
-// ========== HTF SUPPLY/DEMAND ZONES (200 candles, 0.2% cluster) ==========
-function findHTFZones(candles) {
-    if (!candles || candles.length < 50) return { supply: [], demand: [] };
-    const swingHighs = [];
-    const swingLows = [];
-    for (let i = 5; i < candles.length - 5; i++) {
-        const isHigh = candles[i].high > candles[i-1].high && candles[i].high > candles[i-2].high &&
-                       candles[i].high > candles[i+1].high && candles[i].high > candles[i+2].high;
-        const isLow  = candles[i].low  < candles[i-1].low  && candles[i].low  < candles[i-2].low &&
-                       candles[i].low  < candles[i+1].low  && candles[i].low  < candles[i+2].low;
-        if (isHigh) swingHighs.push(candles[i].high);
-        if (isLow)  swingLows.push(candles[i].low);
-    }
-    const supply = [], demand = [];
-    for (const h of swingHighs) {
-        let found = supply.find(z => Math.abs(z.price - h) / h < 0.002);
-        if (found) found.count++;
-        else supply.push({ price: h, count: 1 });
-    }
-    for (const l of swingLows) {
-        let found = demand.find(z => Math.abs(z.price - l) / l < 0.002);
-        if (found) found.count++;
-        else demand.push({ price: l, count: 1 });
-    }
-    return {
-        supply: supply.filter(z => z.count >= 2).map(z => z.price),
-        demand: demand.filter(z => z.count >= 2).map(z => z.price)
-    };
-}
+// ========== INSTITUTIONAL FOOTPRINT DETECTION ==========
 
-function isAtHTFZone(price, zones, type) {
-    for (const zone of zones) {
-        if (Math.abs(price - zone) / price < 0.002) return { atZone: true, zone, type };
-    }
-    return { atZone: false };
-}
-
-// ---------- LTF ZONES (50 candles, 0.1% cluster) ----------
-function findLTFZones(candles) {
-    if (!candles || candles.length < 30) return { supply: [], demand: [] };
-    const recent = candles.slice(-50);
-    const swingHighs = [], swingLows = [];
-    for (let i = 3; i < recent.length - 3; i++) {
-        const isHigh = recent[i].high > recent[i-1].high && recent[i].high > recent[i-2].high &&
-                       recent[i].high > recent[i+1].high && recent[i].high > recent[i+2].high;
-        const isLow  = recent[i].low  < recent[i-1].low  && recent[i].low  < recent[i-2].low &&
-                       recent[i].low  < recent[i+1].low  && recent[i].low  < recent[i+2].low;
-        if (isHigh) swingHighs.push(recent[i].high);
-        if (isLow)  swingLows.push(recent[i].low);
-    }
-    const supply = [], demand = [];
-    for (const h of swingHighs) {
-        let found = supply.find(z => Math.abs(z.price - h) / h < 0.001);
-        if (found) found.count++;
-        else supply.push({ price: h, count: 1 });
-    }
-    for (const l of swingLows) {
-        let found = demand.find(z => Math.abs(z.price - l) / l < 0.001);
-        if (found) found.count++;
-        else demand.push({ price: l, count: 1 });
-    }
-    return {
-        supply: supply.filter(z => z.count >= 2).map(z => z.price),
-        demand: demand.filter(z => z.count >= 2).map(z => z.price)
-    };
-}
-
-// ---------- MARKET STRUCTURE (BOS/CHoCH) ----------
-function detectMarketStructure(candles) {
-    if (!candles || candles.length < 30) return { bos: null, choch: null };
-    const swingHighs = [], swingLows = [];
-    for (let i = 5; i < candles.length - 5; i++) {
-        if (candles[i].high > candles[i-1].high && candles[i].high > candles[i-2].high &&
-            candles[i].high > candles[i+1].high && candles[i].high > candles[i+2].high)
-            swingHighs.push(candles[i].high);
-        if (candles[i].low < candles[i-1].low && candles[i].low < candles[i-2].low &&
-            candles[i].low < candles[i+1].low && candles[i].low < candles[i+2].low)
-            swingLows.push(candles[i].low);
-    }
-    if (swingHighs.length < 2 || swingLows.length < 2) return { bos: null, choch: null };
-    const lastHigh = swingHighs[swingHighs.length-1], prevHigh = swingHighs[swingHighs.length-2];
-    const lastLow = swingLows[swingLows.length-1], prevLow = swingLows[swingLows.length-2];
-    let bos = null;
-    if (lastHigh > prevHigh) bos = 'BULLISH';
-    if (lastLow < prevLow) bos = 'BEARISH';
-    const lastCandle = candles[candles.length-1];
-    let choch = null;
-    if (bos === 'BULLISH' && lastCandle.close > prevHigh) choch = 'BULLISH';
-    if (bos === 'BEARISH' && lastCandle.close < prevLow) choch = 'BEARISH';
-    return { bos, choch };
-}
-
-// ---------- ORDER BLOCK ----------
-function detectOrderBlock(candles) {
-    if (candles.length < 3) return { direction: null };
-    const last = candles[candles.length-1];
-    const prev = candles[candles.length-2];
-    if (prev.close < prev.open && last.close > last.open && last.close > prev.high)
-        return { direction: 'BULLISH', strength: 15, reason: 'Order Block (bullish)' };
-    if (prev.close > prev.open && last.close < last.open && last.close < prev.low)
-        return { direction: 'BEARISH', strength: 15, reason: 'Order Block (bearish)' };
-    return { direction: null };
-}
-
-// ---------- FAIR VALUE GAP ----------
 function detectFVG(candles) {
-    if (candles.length < 3) return { direction: null };
-    const c1 = candles[candles.length-3];
-    const c2 = candles[candles.length-2];
-    const c3 = candles[candles.length-1];
-    if (c1.high < c3.low && c2.close > c1.high)
-        return { direction: 'BULLISH', strength: 10, reason: 'FVG' };
-    if (c3.high < c1.low && c2.close < c1.low)
-        return { direction: 'BEARISH', strength: 10, reason: 'FVG' };
-    return { direction: null };
+    if (candles.length < 3) return null;
+    const c1 = candles[candles.length - 3];
+    const c2 = candles[candles.length - 2];
+    const c3 = candles[candles.length - 1];
+    
+    if (c1.high < c3.low) {
+        return { type: 'BULLISH', strength: 25, reason: 'FVG (bullish gap)', level: c1.high, level2: c3.low };
+    }
+    if (c3.high < c1.low) {
+        return { type: 'BEARISH', strength: 25, reason: 'FVG (bearish gap)', level: c3.high, level2: c1.low };
+    }
+    return null;
 }
 
-// ---------- LIQUIDITY SWEEP ----------
+function detectOrderBlock(candles) {
+    if (candles.length < 3) return null;
+    const prev = candles[candles.length - 2];
+    const last = candles[candles.length - 1];
+    
+    if (prev.close < prev.open && last.close > last.open && last.close > prev.high) {
+        return { type: 'BULLISH', strength: 30, reason: 'Order Block (bullish)', level: prev.low, breakout: prev.high };
+    }
+    if (prev.close > prev.open && last.close < last.open && last.close < prev.low) {
+        return { type: 'BEARISH', strength: 30, reason: 'Order Block (bearish)', level: prev.high, breakout: prev.low };
+    }
+    return null;
+}
+
+function detectBOS(candles) {
+    if (candles.length < 20) return null;
+    
+    const highs = candles.map(c => c.high);
+    const lows = candles.map(c => c.low);
+    const recentHigh = Math.max(...highs.slice(-10));
+    const previousHigh = Math.max(...highs.slice(-20, -10));
+    const recentLow = Math.min(...lows.slice(-10));
+    const previousLow = Math.min(...lows.slice(-20, -10));
+    
+    if (recentHigh > previousHigh) {
+        return { type: 'BULLISH', strength: 20, reason: 'BOS (higher high)', level: previousHigh, newLevel: recentHigh };
+    }
+    if (recentLow < previousLow) {
+        return { type: 'BEARISH', strength: 20, reason: 'BOS (lower low)', level: previousLow, newLevel: recentLow };
+    }
+    return null;
+}
+
 function detectLiquiditySweep(candles) {
-    if (candles.length < 10) return { direction: null };
-    const last = candles[candles.length-1];
-    const recentHigh = Math.max(...candles.slice(-20).map(c => c.high));
-    const recentLow = Math.min(...candles.slice(-20).map(c => c.low));
-    if (last.low < recentLow && last.close > recentLow && last.close > last.open)
-        return { direction: 'BULLISH', strength: 25, reason: 'Liquidity sweep (bullish)' };
-    if (last.high > recentHigh && last.close < recentHigh && last.close < last.open)
-        return { direction: 'BEARISH', strength: 25, reason: 'Liquidity sweep (bearish)' };
-    return { direction: null };
-}
-
-// ---------- BREAK & RETEST (using HTF zone) ----------
-function detectBreakRetest(candles, price, zone, zoneType) {
-    if (candles.length < 5) return { direction: null };
-    const recent = candles.slice(-5);
-    if (zoneType === 'SUPPLY') {
-        const broke = recent.some(c => c.close > zone);
-        const retest = Math.abs(price - zone) / price < 0.001;
-        if (broke && retest) return { direction: 'BULLISH', strength: 15, reason: 'Break & retest' };
-    } else if (zoneType === 'DEMAND') {
-        const broke = recent.some(c => c.close < zone);
-        const retest = Math.abs(price - zone) / price < 0.001;
-        if (broke && retest) return { direction: 'BEARISH', strength: 15, reason: 'Break & retest' };
+    if (candles.length < 10) return null;
+    
+    const last = candles[candles.length - 1];
+    const recentHighs = candles.slice(-20).map(c => c.high);
+    const recentLows = candles.slice(-20).map(c => c.low);
+    const highestHigh = Math.max(...recentHighs);
+    const lowestLow = Math.min(...recentLows);
+    
+    if (last.low < lowestLow && last.close > lowestLow && last.close > last.open) {
+        return { type: 'BULLISH', strength: 35, reason: 'Liquidity sweep (bullish reversal)', level: lowestLow, sweep: last.low };
     }
-    return { direction: null };
+    if (last.high > highestHigh && last.close < highestHigh && last.close < last.open) {
+        return { type: 'BEARISH', strength: 35, reason: 'Liquidity sweep (bearish reversal)', level: highestHigh, sweep: last.high };
+    }
+    return null;
 }
 
-// ---------- CANDLESTICK PATTERNS ----------
-function detectCandlePattern(candle) {
-    const body = Math.abs(candle.close - candle.open);
-    const range = candle.high - candle.low;
-    const lowerWick = Math.min(candle.open, candle.close) - candle.low;
-    const upperWick = candle.high - Math.max(candle.open, candle.close);
-    if (lowerWick > body * 2 && upperWick < body && candle.close > candle.open)
-        return { direction: 'BULLISH', strength: 15, reason: 'Hammer' };
-    if (upperWick > body * 2 && lowerWick < body && candle.close < candle.open)
-        return { direction: 'BEARISH', strength: 15, reason: 'Shooting star' };
-    return { direction: null };
+// ========== DYNAMIC RR (based on confidence) ==========
+function getDynamicRR(confidence) {
+    if (confidence >= 80) return 3.0;      // 1:3
+    if (confidence >= 70) return 2.5;      // 1:2.5
+    if (confidence >= 60) return 2.0;      // 1:2
+    return 1.5;                             // 1:1.5 (minimum)
 }
 
-// ---------- RISK MANAGER ----------
-function calculateTradeLevels(price, atr, zone, zoneType, bias, conf, mode, mult, spread, digits) {
-    let entry, sl, tp1, tp2, rr = 0;
-    const minRR = mode === 'scalp' ? 2.0 : 4.0;
-    const maxRR = mode === 'scalp' ? 4.0 : 12.0;
-    const targetRR = Math.min(minRR + (conf / 100) * 3, maxRR);
-    const atrMult = mode === 'scalp' ? 0.45 : 1.0;
+// ========== SINGLE TP CALCULATION ==========
+function calculateTradeLevels(price, atr, bias, confidence, config) {
+    const atrMult = DEFAULT_MODE === 'scalp' ? 0.45 : 0.8;
+    const slDist = atr * atrMult;
+    const rr = getDynamicRR(confidence);
+    
+    let entry = price;
+    let sl, tp;
+    
     if (bias === 'BUY') {
-        entry = price;
-        let slDist = atr * atrMult;
         sl = entry - slDist;
-        if (sl > zone) sl = zone * 0.998;
-        const risk = entry - sl;
-        tp1 = entry + risk;
-        tp2 = entry + risk * targetRR;
-        rr = targetRR;
+        tp = entry + (entry - sl) * rr;
     } else {
-        entry = price;
-        let slDist = atr * atrMult;
         sl = entry + slDist;
-        if (sl < zone) sl = zone * 1.002;
-        const risk = sl - entry;
-        tp1 = entry - risk;
-        tp2 = entry - risk * targetRR;
-        rr = targetRR;
+        tp = entry - (sl - entry) * rr;
     }
+    
     const riskAmount = DEFAULT_BALANCE * (DEFAULT_RISK_PERCENT / 100);
-    const stopDist = Math.abs(entry - sl) + spread;
-    let lot = riskAmount / (stopDist * mult);
-    lot = Math.floor(lot * 1000) / 1000;
-    lot = Math.max(0.01, Math.min(lot, 50));
+    const stopDist = Math.abs(entry - sl) + config.spread;
+    let lotSize = riskAmount / (stopDist * config.multiplier);
+    lotSize = Math.floor(lotSize * 1000) / 1000;
+    lotSize = Math.max(0.01, Math.min(lotSize, 50));
+    
     return {
-        entry: entry.toFixed(digits),
-        sl: sl.toFixed(digits),
-        tp1: tp1.toFixed(digits),
-        tp2: tp2.toFixed(digits),
+        entry: entry.toFixed(config.digits),
+        sl: sl.toFixed(config.digits),
+        tp: tp.toFixed(config.digits),
         rrRatio: rr.toFixed(1),
-        lotSize: lot.toFixed(2)
+        lotSize: lotSize.toFixed(2)
     };
 }
 
-// ========== MAIN STRATEGY (Hybrid) ==========
+// ========== MAIN STRATEGY (Threshold 55, no sideways penalty) ==========
 function analyzeSignal(prices, candles, assetClass) {
-    if (prices.length < 50) {
-        return { bias: 'WAIT', confidence: 30, reasons: ['Building data'], rsi: 50, trend: 'SIDEWAYS', currentPrice: prices[prices.length-1] };
+    if (candles.length < 50) {
+        return { 
+            bias: 'WAIT', 
+            confidence: 30, 
+            reasons: [`Building data (${candles.length}/50)`],
+            atr: calcATR(prices, 14),
+            currentPrice: prices[prices.length-1],
+            footprints: []
+        };
     }
+    
     const curPrice = prices[prices.length-1];
-    const rsi = calcRSI(prices);
-    const ema20 = calcEMA(prices, 20);
-    const ema50 = calcEMA(prices, 50);
     const atr = calcATR(prices, 14);
-
-    let trend = 'SIDEWAYS';
-    if (ema20 > ema50 && ema20 > ema20 * 1.001) trend = 'BULLISH';
-    if (ema20 < ema50 && ema20 < ema20 * 0.999) trend = 'BEARISH';
-
-    // ---- Common data for both paths ----
-    const ltfZones = findLTFZones(candles);
-    const atLTFSupply = isAtHTFZone(curPrice, ltfZones.supply, 'SUPPLY');
-    const atLTFDemand = isAtHTFZone(curPrice, ltfZones.demand, 'DEMAND');
-    const ltfConfirm = (atLTFSupply.atZone || atLTFDemand.atZone);
-    const ms = detectMarketStructure(candles);
-    const ob = detectOrderBlock(candles);
+    
     const fvg = detectFVG(candles);
+    const ob = detectOrderBlock(candles);
+    const bos = detectBOS(candles);
     const sweep = detectLiquiditySweep(candles);
-    const candlePat = detectCandlePattern(candles[candles.length-1]);
+    
+    let buyScore = 0;
+    let sellScore = 0;
+    let reasons = [];
+    let footprints = [];
+    
+    if (fvg) {
+        if (fvg.type === 'BULLISH') buyScore += fvg.strength;
+        else sellScore += fvg.strength;
+        reasons.push(fvg.reason);
+        footprints.push({ type: 'FVG', data: fvg });
+    }
+    if (ob) {
+        if (ob.type === 'BULLISH') buyScore += ob.strength;
+        else sellScore += ob.strength;
+        reasons.push(ob.reason);
+        footprints.push({ type: 'OB', data: ob });
+    }
+    if (bos) {
+        if (bos.type === 'BULLISH') buyScore += bos.strength;
+        else sellScore += bos.strength;
+        reasons.push(bos.reason);
+        footprints.push({ type: 'BOS', data: bos });
+    }
+    if (sweep) {
+        if (sweep.type === 'BULLISH') buyScore += sweep.strength;
+        else sellScore += sweep.strength;
+        reasons.push(sweep.reason);
+        footprints.push({ type: 'SWEEP', data: sweep });
+    }
+    
     const session = getCurrentSession();
-    const sessionBonus = (session === 'LONDON' || session === 'NEW_YORK') ? 10 : 0;
-
-    // ----- PATH A: HTF Zone-based -----
-    const htfZones = findHTFZones(candles);
-    const atHTFSupply = isAtHTFZone(curPrice, htfZones.supply, 'SUPPLY');
-    const atHTFDemand = isAtHTFZone(curPrice, htfZones.demand, 'DEMAND');
-    const atZone = atHTFSupply.atZone || atHTFDemand.atZone;
-    const htfDirection = atHTFSupply.atZone ? 'SELL' : (atHTFDemand.atZone ? 'BUY' : null);
-    const htfZonePrice = atHTFSupply.atZone ? atHTFSupply.zone : (atHTFDemand.atZone ? atHTFDemand.zone : null);
-    const htfZoneType = atHTFSupply.atZone ? 'SUPPLY' : (atHTFDemand.atZone ? 'DEMAND' : null);
-
-    // Structure alignment for HTF path
-    let structureOk = false;
-    if (htfDirection === 'BUY' && (ms.bos === 'BULLISH' || ms.choch === 'BULLISH')) structureOk = true;
-    if (htfDirection === 'SELL' && (ms.bos === 'BEARISH' || ms.choch === 'BEARISH')) structureOk = true;
-
-    // Footprint and confirmation for HTF path
-    const hasFootprint = (ob.direction !== null || fvg.direction !== null);
-    const hasConfirmation = (sweep.direction !== null);   // liquidity sweep OR break/retest (we'll add break/retest later)
-
-    // ----- PATH B: Footprint-based (no HTF zone required) -----
-    // Requires: BOS + (FVG or OB) + liquidity sweep
-    const hasBOS = (ms.bos !== null);
-    const hasFVGorOB = (fvg.direction !== null || ob.direction !== null);
-    const hasSweep = (sweep.direction !== null);
-    const footprintPathValid = hasBOS && hasFVGorOB && hasSweep;
-
-    // Determine direction from footprint path if valid
-    let footprintDirection = null;
-    if (footprintPathValid) {
-        // Combine signals: if OB/FVG and sweep agree, use that direction
-        const bullishSignals = (ob.direction === 'BULLISH' ? 1 : 0) + (fvg.direction === 'BULLISH' ? 1 : 0) + (sweep.direction === 'BULLISH' ? 1 : 0);
-        const bearishSignals = (ob.direction === 'BEARISH' ? 1 : 0) + (fvg.direction === 'BEARISH' ? 1 : 0) + (sweep.direction === 'BEARISH' ? 1 : 0);
-        if (bullishSignals > bearishSignals) footprintDirection = 'BUY';
-        else if (bearishSignals > bullishSignals) footprintDirection = 'SELL';
+    if (session === 'LONDON' || session === 'NEW_YORK') {
+        buyScore += 10;
+        sellScore += 10;
+        reasons.push(`${session} session (high volatility)`);
     }
-
-    // ----- Scoring function -----
-    function computeScore(direction, includeZoneBonus, zonePrice, zoneType) {
-        let score = 0;
-        const reasons = [];
-
-        // Base from direction
-        if (direction === 'BUY') {
-            score += 20;
-            reasons.push('Direction: BUY');
-        } else {
-            score += 20;
-            reasons.push('Direction: SELL');
-        }
-
-        // LTF zone confirmation
-        if (ltfConfirm) {
-            score += 10;
-            reasons.push('LTF zone confirmation');
-        }
-
-        // OB, FVG
-        if (ob.direction === direction) { score += ob.strength; reasons.push(ob.reason); }
-        if (fvg.direction === direction) { score += fvg.strength; reasons.push(fvg.reason); }
-
-        // Liquidity sweep
-        if (sweep.direction === direction) { score += sweep.strength; reasons.push(sweep.reason); }
-
-        // Break & retest (only if we have a zone)
-        if (zonePrice && zoneType) {
-            const br = detectBreakRetest(candles, curPrice, zonePrice, zoneType);
-            if (br.direction === direction) { score += br.strength; reasons.push(br.reason); }
-        }
-
-        // Candlestick pattern
-        if (candlePat.direction === direction) { score += candlePat.strength; reasons.push(candlePat.reason); }
-
-        // Session bonus
-        score += sessionBonus;
-        if (sessionBonus > 0) reasons.push(`${session} session`);
-
-        return { score, reasons };
+    
+    let bias = 'WAIT';
+    let confidence = 40;
+    const minScore = 55;  // Threshold 55
+    
+    if (buyScore > minScore && buyScore > sellScore) {
+        bias = 'BUY';
+        confidence = Math.min(85, 55 + Math.floor(buyScore / 3));
+    } else if (sellScore > minScore && sellScore > buyScore) {
+        bias = 'SELL';
+        confidence = Math.min(85, 55 + Math.floor(sellScore / 3));
     }
-
-    let finalBias = 'WAIT';
-    let finalConfidence = 40;
-    let finalReasons = [];
-    let finalZone = null;
-    let finalZoneType = null;
-
-    // Try Path A first (HTF zone)
-    if (atZone && htfDirection && structureOk && hasFootprint && hasSweep) {
-        const { score, reasons } = computeScore(htfDirection, true, htfZonePrice, htfZoneType);
-        if (score >= 50) {
-            finalBias = htfDirection;
-            finalConfidence = Math.min(85, 50 + Math.floor(score / 2));
-            finalReasons = reasons;
-            finalZone = htfZonePrice;
-            finalZoneType = htfZoneType;
-        }
-    }
-
-    // If Path A did not trigger, try Path B (footprint-based)
-    if (finalBias === 'WAIT' && footprintPathValid && footprintDirection) {
-        const { score, reasons } = computeScore(footprintDirection, false, null, null);
-        if (score >= 50) {
-            finalBias = footprintDirection;
-            finalConfidence = Math.min(85, 50 + Math.floor(score / 2));
-            finalReasons = reasons;
-            // For footprint path, use the sweep level as zone (optional)
-            finalZone = curPrice;
-            finalZoneType = 'FOOTPRINT';
-        }
-    }
-
-    // Final filters
-    if (finalBias !== 'WAIT') {
-        if (finalBias === 'BUY' && rsi > 70) finalBias = 'WAIT';
-        if (finalBias === 'SELL' && rsi < 30) finalBias = 'WAIT';
-    }
-    if (finalBias !== 'WAIT' && trend === 'SIDEWAYS') {
-        finalConfidence = Math.max(50, finalConfidence - 10);
-        finalReasons.push('Sideways market - reduced confidence');
-    }
-
-    if (finalBias === 'WAIT') {
-        return { bias: 'WAIT', confidence: 35, reasons: ['No valid setup'], rsi, trend, currentPrice: curPrice, atr };
-    }
-
-    const uniqueReasons = [...new Set(finalReasons)];
+    
     return {
-        bias: finalBias,
-        confidence: finalConfidence,
-        reasons: uniqueReasons.slice(0, 5),
-        rsi,
-        trend,
-        currentPrice: curPrice,
+        bias,
+        confidence,
+        reasons: reasons.slice(0, 4),
+        footprints,
         atr,
-        zone: finalZone,
-        zoneType: finalZoneType
+        currentPrice: curPrice
     };
 }
 
-// ---------- TELEGRAM ALERT (30-min cooldown) ----------
+// ========== TELEGRAM ALERT ==========
 async function sendTelegramAlert(symbolDisplay, signal, assetConfig) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
+    
     const cacheKey = `${symbolDisplay}_${signal.bias}`;
     const lastAlert = lastAlertCache[cacheKey];
     const now = Date.now();
+    
     if (lastAlert && (now - lastAlert) < 1800000) {
-        console.log(`⏸️ Skipping duplicate ${signal.bias} for ${symbolDisplay} (cooldown active)`);
+        console.log(`⏸️ Skipping duplicate ${signal.bias} for ${symbolDisplay} (cooldown)`);
         return false;
     }
-    let tradeLevels = null;
-    if (signal.bias !== 'WAIT') {
-        tradeLevels = calculateTradeLevels(
-            signal.currentPrice, signal.atr, signal.zone, signal.zoneType, signal.bias, signal.confidence, DEFAULT_MODE,
-            assetConfig.multiplier, assetConfig.spread, assetConfig.digits
-        );
-    }
-    const icon = signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL';
-    const timestamp = new Date().toLocaleString();
+    
+    const tradeLevels = calculateTradeLevels(signal.currentPrice, signal.atr, signal.bias, signal.confidence, assetConfig);
     const session = getCurrentSession();
-    let msg = `
+    const timestamp = new Date().toLocaleString();
+    
+    const message = `
 🤖 OMNI-SIGNAL ALERT 🤖
 ━━━━━━━━━━━━━━━━━━━
-${icon} | ${signal.confidence}% confidence
+${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.confidence}% confidence
 ⏰ ${timestamp} (${session} session)
 
 📊 ${symbolDisplay}
 💰 Price: ${signal.currentPrice.toFixed(assetConfig.digits)}
-📈 RSI: ${signal.rsi.toFixed(1)} | Trend: ${signal.trend}
-📊 ATR: ${signal.atr.toFixed(assetConfig.digits===5?5:2)}
-📍 ${signal.zoneType} Zone: ${signal.zone?.toFixed(assetConfig.digits) || 'N/A'}
+📊 ATR: ${signal.atr.toFixed(assetConfig.digits === 5 ? 5 : 2)}
 
 ━━━━━━━━━━━━━━━━━━━
-💡 ${signal.reasons.slice(0,4).join(', ') || 'Signal detected'}
-`;
-    if (tradeLevels) {
-        msg += `
+💡 ${signal.reasons.slice(0, 3).join(', ') || 'Institutional footprint detected'}
+
 ━━━━━━━━━━━━━━━━━━━
 🎯 TRADE SETUP
 📥 Entry: ${tradeLevels.entry}
 🛑 Stop Loss: ${tradeLevels.sl}
-🎯 TP1: ${tradeLevels.tp1} | TP2: ${tradeLevels.tp2}
+🎯 Take Profit: ${tradeLevels.tp}
 📐 Risk/Reward: 1:${tradeLevels.rrRatio}
 💰 Lot Size: ${tradeLevels.lotSize}
-`;
-    }
-    msg += `\n⚠️ Mode: ${DEFAULT_MODE} | Risk: ${DEFAULT_RISK_PERCENT}% | Balance: $${DEFAULT_BALANCE}`;
+
+⚠️ Mode: ${DEFAULT_MODE} | Risk: ${DEFAULT_RISK_PERCENT}% | Balance: $${DEFAULT_BALANCE}
+    `;
+    
     try {
         const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: msg, parse_mode: 'HTML' })
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: message, parse_mode: 'HTML' })
         });
         const json = await res.json();
         if (json.ok) {
@@ -597,7 +387,7 @@ ${icon} | ${signal.confidence}% confidence
     return false;
 }
 
-// ---------- CANDLE BUILDER (unchanged) ----------
+// ========== CANDLE BUILDER ==========
 function loadCandleHistory(file) {
     const f = path.join(dataDir, `${file}.json`);
     if (fs.existsSync(f)) {
@@ -615,7 +405,7 @@ function saveCandleToHistory(file, candle) {
     if (fs.existsSync(f)) try { data = JSON.parse(fs.readFileSync(f)); } catch(e) {}
     if (!data.candles) data.candles = [];
     data.candles.push(candle);
-    if (data.candles.length > 200) data.candles.shift();
+    if (data.candles.length > 500) data.candles.shift();
     data.currentPrice = candle.close;
     data.timestamp = Date.now();
     fs.writeFileSync(f, JSON.stringify(data, null, 2));
@@ -636,11 +426,13 @@ async function processAsset(file, priceFetcher, displayName, assetConfig, isOil 
     try {
         let price = await priceFetcher();
         if (!price) throw new Error('No price');
+        
         const now = Date.now();
         const minute = Math.floor(now / 60000);
         const bucket = Math.floor(minute / 5);
         let state = loadCandleState(file);
         let candles = loadCandleHistory(file);
+        
         if (!state || state.bucket !== bucket) {
             if (state && state.candle && state.lastPrice) {
                 const completed = {
@@ -653,9 +445,9 @@ async function processAsset(file, priceFetcher, displayName, assetConfig, isOil 
                 saveCandleToHistory(file, completed);
                 candles.push(completed);
                 const prices = candles.map(c => c.close);
-                if (prices.length >= 50) {
+                if (candles.length >= 50) {
                     const signal = analyzeSignal(prices, candles, assetConfig.class);
-                    console.log(`📊 ${displayName} - ${signal.bias} (${signal.confidence}%) - ${signal.reasons.slice(0,2).join(', ')}`);
+                    console.log(`📊 ${displayName} - ${signal.bias} (${signal.confidence}%) - ${signal.reasons.slice(0, 2).join(', ') || 'No setup'}`);
                     if (signal.bias !== 'WAIT' && signal.confidence >= 55) {
                         await sendTelegramAlert(displayName, signal, assetConfig);
                     }
@@ -682,9 +474,9 @@ async function processAsset(file, priceFetcher, displayName, assetConfig, isOil 
     }
 }
 
-// ---------- MAIN ----------
+// ========== MAIN ==========
 async function main() {
-    console.log('--- OMNI-SIGNAL v20.0 (Hybrid: HTF zones OR BOS+FVG/OB+sweep) ---');
+    console.log('--- OMNI-SIGNAL FINAL v6.0 (Threshold 55, dynamic RR, single TP) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
     console.log(`Alpha Vantage: ${!!ALPHA_VANTAGE_KEY ? '✅' : '❌'}`);
     console.log(`Mode: ${DEFAULT_MODE} | Balance: $${DEFAULT_BALANCE} | Risk: ${DEFAULT_RISK_PERCENT}%`);
@@ -728,9 +520,15 @@ async function main() {
 
     for (const a of forex) await processAsset(a.file, a.fetcher, a.display, a.config);
     console.log('⏸️ 1.5s delay...'); await new Promise(r => setTimeout(r, 1500));
-    for (let i=0; i<crypto.length; i++) { await processAsset(crypto[i].file, crypto[i].fetcher, crypto[i].display, crypto[i].config); if (i<crypto.length-1) await new Promise(r => setTimeout(r, 1500)); }
+    for (let i = 0; i < crypto.length; i++) { 
+        await processAsset(crypto[i].file, crypto[i].fetcher, crypto[i].display, crypto[i].config); 
+        if (i < crypto.length - 1) await new Promise(r => setTimeout(r, 1500)); 
+    }
     console.log('⏸️ 1.5s delay...'); await new Promise(r => setTimeout(r, 1500));
-    for (let i=0; i<metals.length; i++) { await processAsset(metals[i].file, metals[i].fetcher, metals[i].display, metals[i].config); if (i<metals.length-1) await new Promise(r => setTimeout(r, 1500)); }
+    for (let i = 0; i < metals.length; i++) { 
+        await processAsset(metals[i].file, metals[i].fetcher, metals[i].display, metals[i].config); 
+        if (i < metals.length - 1) await new Promise(r => setTimeout(r, 1500)); 
+    }
     console.log('⏸️ 1.5s delay...'); await new Promise(r => setTimeout(r, 1500));
     for (const a of oil) await processAsset(a.file, a.fetcher, a.display, a.config, true);
 
