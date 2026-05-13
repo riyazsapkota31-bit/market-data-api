@@ -2267,10 +2267,17 @@
       "high": 91.05,
       "low": 91.05,
       "close": 91.05
+    },
+    {
+      "timestamp": 1778712046464,
+      "open": 90.99,
+      "high": 91.04,
+      "low": 90.99,
+      "close": 91.04
     }
   ],
-  "currentPrice": 91.05,
-  "timestamp": 1778712046464,
+  "currentPrice": 91.04,
+  "timestamp": 1778712398641,
   "high": 95.79,
   "low": 90.5,
   "change": 0.011007154650528473
