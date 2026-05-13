@@ -1,5 +1,5 @@
-// fetch-prices.js – SCALPING OPTIMIZED (4-5+ winning trades daily)
-// Features: Asset-appropriate TP/SL (1:2 min RR) + Duplicate prevention + High frequency
+// fetch-prices.js – SCALPING OPTIMIZED with SCORING SYSTEM (60+ points = B grade minimum)
+// Features: No C trades | Score breakdown | Dynamic lot sizing | 1:2+ RR
 
 const fs = require('fs');
 const path = require('path');
@@ -137,7 +137,6 @@ function isCooldownActive(symbol, bias) {
     const key = `${symbol}_${bias}`;
     const lastAlert = cooldown[key];
     if (!lastAlert) return false;
-    // 15 min cooldown for scalping (was 30)
     return (Date.now() - lastAlert) < 15 * 60 * 1000;
 }
 
@@ -344,7 +343,6 @@ function detectLiquiditySweep(candles, level) {
     return false;
 }
 
-// ========== FIXED RETRACEMENT (2-candle confirmation) ==========
 function checkRetracement(candles, level, bias) {
     if (candles.length < 6) return false;
     
@@ -378,11 +376,218 @@ function checkRetracement(candles, level, bias) {
     }
 }
 
-// ========== LOGICAL STOP LOSS (asset-aware) ==========
+function detectMSS(candles, bias) {
+    if (candles.length < 15) return { detected: false, strength: 0 };
+    
+    const recentCandles = candles.slice(-12);
+    const highs = recentCandles.map(c => c.high);
+    const lows = recentCandles.map(c => c.low);
+    
+    let lastSwingHigh = -Infinity;
+    let lastSwingLow = Infinity;
+    let swingIndex = -1;
+    
+    for (let i = 3; i < recentCandles.length - 3; i++) {
+        const isSwingHigh = recentCandles[i].high > recentCandles[i-1].high && 
+                            recentCandles[i].high > recentCandles[i-2].high &&
+                            recentCandles[i].high > recentCandles[i+1].high &&
+                            recentCandles[i].high > recentCandles[i+2].high;
+        const isSwingLow = recentCandles[i].low < recentCandles[i-1].low && 
+                           recentCandles[i].low < recentCandles[i-2].low &&
+                           recentCandles[i].low < recentCandles[i+1].low &&
+                           recentCandles[i].low < recentCandles[i+2].low;
+        
+        if (isSwingHigh && recentCandles[i].high > lastSwingHigh) {
+            lastSwingHigh = recentCandles[i].high;
+            swingIndex = i;
+        }
+        if (isSwingLow && recentCandles[i].low < lastSwingLow) {
+            lastSwingLow = recentCandles[i].low;
+            swingIndex = i;
+        }
+    }
+    
+    if (swingIndex === -1 || swingIndex >= recentCandles.length - 2) {
+        return { detected: false, strength: 0 };
+    }
+    
+    const candlesAfter = recentCandles.slice(swingIndex + 1);
+    if (candlesAfter.length < 2) return { detected: false, strength: 0 };
+    
+    if (bias === 'BUY') {
+        const brokeLow = lastSwingLow < Math.min(...lows.slice(0, -3));
+        const higherLow = candlesAfter[0].low > lastSwingLow;
+        const higherHigh = Math.max(...candlesAfter.map(c => c.high)) > lastSwingHigh;
+        
+        if (brokeLow && higherLow && higherHigh) {
+            return { detected: true, strength: 80 };
+        }
+        if (higherLow && higherHigh) {
+            return { detected: true, strength: 60 };
+        }
+    } else {
+        const brokeHigh = lastSwingHigh > Math.max(...highs.slice(0, -3));
+        const lowerHigh = candlesAfter[0].high < lastSwingHigh;
+        const lowerLow = Math.min(...candlesAfter.map(c => c.low)) < lastSwingLow;
+        
+        if (brokeHigh && lowerHigh && lowerLow) {
+            return { detected: true, strength: 80 };
+        }
+        if (lowerHigh && lowerLow) {
+            return { detected: true, strength: 60 };
+        }
+    }
+    
+    return { detected: false, strength: 0 };
+}
+
+function detectCandlePattern(candles, bias) {
+    if (candles.length < 2) return { detected: false, pattern: null, strength: 0 };
+    
+    const last = candles[candles.length - 1];
+    const prev = candles[candles.length - 2];
+    
+    if (bias === 'BUY') {
+        const bullishEngulfing = prev.close < prev.open && 
+                                  last.close > last.open &&
+                                  last.close > prev.open &&
+                                  last.open < prev.close;
+        if (bullishEngulfing) {
+            return { detected: true, pattern: 'BULLISH_ENGULFING', strength: 75 };
+        }
+        
+        const bodySize = Math.abs(last.close - last.open);
+        const lowerWick = Math.min(last.open, last.close) - last.low;
+        const bullishPinBar = lowerWick > bodySize * 2 && last.close > last.open;
+        if (bullishPinBar) {
+            return { detected: true, pattern: 'BULLISH_PINBAR', strength: 70 };
+        }
+    } else {
+        const bearishEngulfing = prev.close > prev.open && 
+                                  last.close < last.open &&
+                                  last.close < prev.open &&
+                                  last.open > prev.close;
+        if (bearishEngulfing) {
+            return { detected: true, pattern: 'BEARISH_ENGULFING', strength: 75 };
+        }
+        
+        const bodySize = Math.abs(last.close - last.open);
+        const upperWick = last.high - Math.max(last.open, last.close);
+        const bearishPinBar = upperWick > bodySize * 2 && last.close < last.open;
+        if (bearishPinBar) {
+            return { detected: true, pattern: 'BEARISH_PINBAR', strength: 70 };
+        }
+    }
+    
+    return { detected: false, pattern: null, strength: 0 };
+}
+
+// ========== SCORING SYSTEM (60+ points = B grade minimum) ==========
+function calculateSignalScore(factors) {
+    let score = 0;
+    let breakdown = [];
+    
+    // Core requirements (must have these to even consider)
+    if (!factors.bos || !factors.atLevel) {
+        return { score: 0, breakdown: ['Missing BOS or key level'], passed: false, grade: 'F', recommendedLotPercent: 0 };
+    }
+    
+    // BOS (required - 25 points)
+    if (factors.bos) {
+        score += 25;
+        breakdown.push('BOS: 25');
+    }
+    
+    // At key level (required - 15 points)
+    if (factors.atLevel) {
+        score += 15;
+        breakdown.push('Key level: 15');
+    }
+    
+    // Retracement (20 points)
+    if (factors.retraced) {
+        score += 20;
+        breakdown.push('Retracement: 20');
+    }
+    
+    // Liquidity Sweep (20 points)
+    if (factors.sweep) {
+        score += 20;
+        breakdown.push('Liquidity sweep: 20');
+    }
+    
+    // MSS/CHoCH (15 points)
+    if (factors.mss && factors.mss.detected) {
+        score += 15;
+        breakdown.push(`MSS: 15`);
+    }
+    
+    // Candle Pattern (10 points)
+    if (factors.candlePattern && factors.candlePattern.detected) {
+        score += 10;
+        breakdown.push(`${factors.candlePattern.pattern}: 10`);
+    }
+    
+    // FVG (10 points)
+    if (factors.fvg) {
+        score += 10;
+        breakdown.push('FVG: 10');
+    }
+    
+    // Order Block (10 points)
+    if (factors.ob) {
+        score += 10;
+        breakdown.push('Order block: 10');
+    }
+    
+    // Session boost (+5)
+    if (factors.sessionBoost) {
+        score += 5;
+        breakdown.push('London/NY session: +5');
+    }
+    
+    // Cap at 100
+    score = Math.min(100, score);
+    
+    // Determine grade (60 points minimum to PASS)
+    let grade = 'F';
+    let passed = false;
+    let recommendedLotPercent = 0;
+    
+    if (score >= 80) {
+        grade = 'A+';
+        passed = true;
+        recommendedLotPercent = 100;
+    } else if (score >= 70) {
+        grade = 'A';
+        passed = true;
+        recommendedLotPercent = 100;
+    } else if (score >= 60) {
+        grade = 'B';
+        passed = true;
+        recommendedLotPercent = 75;
+    } else if (score >= 50) {
+        grade = 'C';
+        passed = false;
+        recommendedLotPercent = 0;
+    } else {
+        grade = 'D/F';
+        passed = false;
+        recommendedLotPercent = 0;
+    }
+    
+    return {
+        score: score,
+        grade: grade,
+        passed: passed,
+        recommendedLotPercent: recommendedLotPercent,
+        breakdown: breakdown
+    };
+}
+
 function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
     const { minStopPips, maxStopPips, atrMultiplier, class: assetClass } = assetConfig;
     
-    // Calculate ATR-based stop
     let atrStop = 0;
     if (candles && candles.length >= 20) {
         const recentCandles = candles.slice(-20);
@@ -394,7 +599,6 @@ function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
         atrStop = avgTrueRange * atrMultiplier;
     }
     
-    // Find swing points for logical placement
     let swingStop = null;
     if (candles && candles.length >= 30) {
         const recentCandles = candles.slice(-30);
@@ -431,7 +635,6 @@ function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
         }
     }
     
-    // Calculate final stop (prefer swing point, then ATR, then min stop)
     let stopDistance = 0;
     let finalStop = null;
     
@@ -446,7 +649,6 @@ function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
         finalStop = bias === 'BUY' ? currentPrice - minStopPips : currentPrice + minStopPips;
     }
     
-    // Clamp to min/max pips
     let stopPips = stopDistance;
     if (assetClass === 'forex') stopPips = stopDistance * 10000;
     else if (assetClass === 'commodities') stopPips = stopDistance;
@@ -463,12 +665,10 @@ function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
     return finalStop;
 }
 
-// ========== LOGICAL TAKE PROFIT (1:2 MIN RR, single target) ==========
 function findLogicalTakeProfit(candles, currentPrice, entry, stopLoss, bias, assetConfig) {
-    const { tpMultiplier, minStopPips, class: assetClass } = assetConfig;
+    const { tpMultiplier } = assetConfig;
     const risk = Math.abs(entry - stopLoss);
     
-    // Find next major level for TP
     let levelTP = null;
     if (candles && candles.length >= 50) {
         const recentCandles = candles.slice(-50);
@@ -506,10 +706,9 @@ function findLogicalTakeProfit(candles, currentPrice, entry, stopLoss, bias, ass
         }
     }
     
-    // Calculate target based on min RR (1:2 minimum)
     let takeProfit = null;
     let actualRR = 0;
-    const minRR = 2.0;  // 1:2 MINIMUM
+    const minRR = 2.0;
     const targetRR = Math.max(minRR, tpMultiplier);
     
     if (levelTP) {
@@ -531,7 +730,6 @@ function findLogicalTakeProfit(candles, currentPrice, entry, stopLoss, bias, ass
             }
         }
     } else {
-        // No clear level, use min RR target
         if (bias === 'BUY') {
             takeProfit = entry + (risk * targetRR);
         } else {
@@ -540,7 +738,6 @@ function findLogicalTakeProfit(candles, currentPrice, entry, stopLoss, bias, ass
         actualRR = targetRR;
     }
     
-    // Cap at 4:1 (don't chase unrealistic targets)
     if (actualRR > 4.0) {
         if (bias === 'BUY') {
             takeProfit = entry + (risk * 4.0);
@@ -553,20 +750,17 @@ function findLogicalTakeProfit(candles, currentPrice, entry, stopLoss, bias, ass
     return { takeProfit, rr: actualRR.toFixed(1) };
 }
 
-// ========== TRADE LEVELS CALCULATION ==========
 function calculateTradeLevels(price, bias, assetConfig, candles) {
     const stopLoss = findLogicalStopLoss(candles, price, bias, assetConfig);
     const entry = price;
     const { takeProfit, rr } = findLogicalTakeProfit(candles, price, entry, stopLoss, bias, assetConfig);
     const riskDistance = Math.abs(entry - stopLoss);
     
-    // Verify min RR is met
     if (parseFloat(rr) < 2.0) {
         console.log(`⚠️ RR ${rr} below minimum 2:1, skipping`);
         return null;
     }
     
-    // Calculate lot size
     const riskAmount = DEFAULT_BALANCE * (DEFAULT_RISK_PERCENT / 100);
     const stopDistPoints = riskDistance + assetConfig.spread;
     let lotSize = riskAmount / (stopDistPoints * assetConfig.multiplier);
@@ -583,71 +777,99 @@ function calculateTradeLevels(price, bias, assetConfig, candles) {
     };
 }
 
-// ========== SIGNAL ANALYSIS (optimized for scalping frequency) ==========
+// ========== SIGNAL ANALYSIS WITH SCORING SYSTEM ==========
 function analyzeSignal(prices, candles, assetConfig) {
     if (candles.length < 30) {
-        return { bias: 'WAIT', confidence: 30, reason: `Building data (${candles.length}/30)`, currentPrice: prices[prices.length-1] };
+        return { bias: 'WAIT', confidence: 30, currentPrice: prices[prices.length-1] };
     }
     
     const curPrice = prices[prices.length-1];
     const keyLevels = getKeyLevels(candles, curPrice);
     const atSupport = isAtSupport(curPrice, keyLevels);
     const atResistance = isAtResistance(curPrice, keyLevels);
+    const atLevel = atSupport.atLevel || atResistance.atLevel;
     
     const bos = detectBOS(candles);
     const fvg = detectFVG(candles);
     const ob = detectOrderBlock(candles);
+    const sessionBoost = getSessionMultiplier() >= 1.0;
     
-    let signal = null;
-    let reasons = [];
-    let confidence = 0;
+    let bias = null;
+    let targetLevel = null;
+    let retraced = false;
+    let sweep = false;
+    let mss = { detected: false, strength: 0 };
+    let candlePattern = { detected: false, pattern: null, strength: 0 };
     
-    // SCALPING: Require fewer confluences (BOS + retrace OR sweep)
     if (atSupport.atLevel) {
-        const targetLevel = fvg ? (fvg.type === 'BULLISH' ? fvg.level2 : fvg.level) : (ob ? ob.level : null);
-        const retraced = targetLevel ? checkRetracement(candles, targetLevel, 'BUY') : false;
-        const sweep = targetLevel ? detectLiquiditySweep(candles, targetLevel) : false;
-        
-        if (bos && bos.type === 'BULLISH' && (retraced || sweep)) {
-            signal = 'BUY';
-            confidence = retraced && sweep ? 75 : 65;
-            reasons.push(`🟢 BUY at ${atSupport.type} support (${atSupport.level.toFixed(assetConfig.digits)})`);
-            reasons.push(`📈 BOS confirmed`);
-            if (fvg) reasons.push(`📊 FVG detected`);
-            if (ob) reasons.push(`🔷 OB detected`);
-            if (retraced) reasons.push(`✅ Retracement confirmed`);
-            if (sweep) reasons.push(`💧 Liquidity sweep confirmed`);
-        }
+        bias = 'BUY';
+        targetLevel = fvg ? (fvg.type === 'BULLISH' ? fvg.level2 : fvg.level) : (ob ? ob.level : null);
+        retraced = targetLevel ? checkRetracement(candles, targetLevel, 'BUY') : false;
+        sweep = targetLevel ? detectLiquiditySweep(candles, targetLevel) : false;
+        mss = detectMSS(candles, 'BUY');
+        candlePattern = detectCandlePattern(candles, 'BUY');
+    } else if (atResistance.atLevel) {
+        bias = 'SELL';
+        targetLevel = fvg ? (fvg.type === 'BEARISH' ? fvg.level : fvg.level2) : (ob ? ob.level : null);
+        retraced = targetLevel ? checkRetracement(candles, targetLevel, 'SELL') : false;
+        sweep = targetLevel ? detectLiquiditySweep(candles, targetLevel) : false;
+        mss = detectMSS(candles, 'SELL');
+        candlePattern = detectCandlePattern(candles, 'SELL');
     }
     
-    if (atResistance.atLevel && !signal) {
-        const targetLevel = fvg ? (fvg.type === 'BEARISH' ? fvg.level : fvg.level2) : (ob ? ob.level : null);
-        const retraced = targetLevel ? checkRetracement(candles, targetLevel, 'SELL') : false;
-        const sweep = targetLevel ? detectLiquiditySweep(candles, targetLevel) : false;
+    // Calculate score
+    const scoreResult = calculateSignalScore({
+        bos: !!(bos && ((bias === 'BUY' && bos.type === 'BULLISH') || (bias === 'SELL' && bos.type === 'BEARISH'))),
+        atLevel: atLevel,
+        retraced: retraced,
+        sweep: sweep,
+        mss: mss,
+        candlePattern: candlePattern,
+        fvg: !!fvg,
+        ob: !!ob,
+        sessionBoost: sessionBoost
+    });
+    
+    // Build reasons
+    let reasons = [];
+    if (scoreResult.passed) {
+        reasons.push(`${bias === 'BUY' ? '🟢' : '🔴'} ${bias} Signal | Grade: ${scoreResult.grade} (${scoreResult.score}/100 pts)`);
+        if (atSupport.atLevel) reasons.push(`📍 Support at ${atSupport.level.toFixed(assetConfig.digits)} (${atSupport.type})`);
+        if (atResistance.atLevel) reasons.push(`📍 Resistance at ${atResistance.level.toFixed(assetConfig.digits)} (${atResistance.type})`);
+        if (bos) reasons.push(`📈 BOS confirmed (broke ${bos.level.toFixed(assetConfig.digits)})`);
+        if (retraced) reasons.push(`✅ Retracement confirmed (2 candles)`);
+        if (sweep) reasons.push(`💧 Liquidity sweep confirmed`);
+        if (mss.detected) reasons.push(`🔄 MSS confirmed (strength: ${mss.strength})`);
+        if (candlePattern.detected) reasons.push(`🕯️ ${candlePattern.pattern} detected`);
+        if (fvg) reasons.push(`📊 FVG: ${fvg.level.toFixed(assetConfig.digits)} → ${fvg.level2.toFixed(assetConfig.digits)}`);
+        if (ob) reasons.push(`🔷 OB at ${ob.level.toFixed(assetConfig.digits)}`);
+        if (sessionBoost) reasons.push(`🔥 London/NY session boost (+5 pts)`);
+        reasons.push(`📊 Score breakdown: ${scoreResult.breakdown.join(' + ')} = ${scoreResult.score}`);
         
-        if (bos && bos.type === 'BEARISH' && (retraced || sweep)) {
-            signal = 'SELL';
-            confidence = retraced && sweep ? 75 : 65;
-            reasons.push(`🔴 SELL at ${atResistance.type} resistance (${atResistance.level.toFixed(assetConfig.digits)})`);
-            reasons.push(`📉 BOS confirmed`);
-            if (fvg) reasons.push(`📊 FVG detected`);
-            if (ob) reasons.push(`🔷 OB detected`);
-            if (retraced) reasons.push(`✅ Retracement confirmed`);
-            if (sweep) reasons.push(`💧 Liquidity sweep confirmed`);
+        if (scoreResult.recommendedLotPercent < 100) {
+            reasons.push(`⚠️ B-grade signal: Use ${scoreResult.recommendedLotPercent}% of calculated lot size`);
         }
-    }
-    
-    const sessionMult = getSessionMultiplier();
-    if (signal && sessionMult >= 1.0) reasons.push('🔥 High volatility session');
-    
-    if (signal) {
-        confidence = Math.min(85, Math.floor(65 + (sessionMult * 10)));
+        
+        let confidence = Math.min(85, 50 + Math.floor(scoreResult.score / 2.5));
+        
+        return {
+            bias: bias,
+            confidence: confidence,
+            grade: scoreResult.grade,
+            score: scoreResult.score,
+            lotPercent: scoreResult.recommendedLotPercent,
+            reasons: reasons,
+            currentPrice: curPrice,
+            targetLevel: targetLevel
+        };
     }
     
     return {
-        bias: signal || 'WAIT',
-        confidence: signal ? confidence : 40,
-        reasons: signal ? reasons : ['⏸️ No setup found'],
+        bias: 'WAIT',
+        confidence: 40,
+        grade: scoreResult.grade,
+        score: scoreResult.score,
+        reasons: [`❌ Signal rejected: ${scoreResult.score}/100 pts (need 60+ for B grade)`],
         currentPrice: curPrice
     };
 }
@@ -667,17 +889,26 @@ async function sendTelegramAlert(symbolDisplay, signal, tradeLevels, assetConfig
     const session = getCurrentSession();
     const timestamp = new Date().toLocaleString();
     
+    // Adjust lot size based on grade
+    let finalLotSize = parseFloat(tradeLevels.lotSize);
+    let lotAdjustmentNote = "";
+    if (signal.grade === 'B' && signal.lotPercent === 75) {
+        finalLotSize = finalLotSize * 0.75;
+        lotAdjustmentNote = " (75% of calculated - B-grade signal)";
+    }
+    finalLotSize = Math.floor(finalLotSize * 1000) / 1000;
+    
     const message = `
 🤖 OMNI-SIGNAL ALERT 🤖
 ━━━━━━━━━━━━━━━━━━━
-${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.confidence}% confidence
+${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.grade} Grade (${signal.score}/100) | ${signal.confidence}% confidence
 ⏰ ${timestamp} (${session} session)
 
 📊 ${symbolDisplay}
 💰 Price: ${signal.currentPrice.toFixed(assetConfig.digits)}
 
 ━━━━━━━━━━━━━━━━━━━
-💡 ${signal.reasons.slice(0, 4).join('\n')}
+💡 ${signal.reasons.slice(0, 6).join('\n')}
 
 ━━━━━━━━━━━━━━━━━━━
 🎯 TRADE SETUP
@@ -685,7 +916,7 @@ ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.confidence}% conf
 🛑 Stop Loss: ${tradeLevels.sl}
 🎯 Take Profit: ${tradeLevels.tp}
 📐 Risk/Reward: 1:${tradeLevels.rrRatio}
-💰 Lot Size: ${tradeLevels.lotSize}
+💰 Lot Size: ${finalLotSize.toFixed(2)}${lotAdjustmentNote}
 
 ━━━━━━━━━━━━━━━━━━━
 ⚠️ Mode: SCALP | Risk: ${DEFAULT_RISK_PERCENT}% | Balance: $${DEFAULT_BALANCE}
@@ -699,7 +930,7 @@ ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.confidence}% conf
         });
         const json = await res.json();
         if (json.ok) {
-            console.log(`✅ Alert sent for ${symbolDisplay}`);
+            console.log(`✅ Alert sent for ${symbolDisplay} (${signal.grade} - ${signal.score}pts)`);
             setCooldown(symbolDisplay, signal.bias);
             return true;
         }
@@ -769,14 +1000,18 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
                 const prices = candles.map(c => c.close);
                 if (candles.length >= 30) {
                     const signal = analyzeSignal(prices, candles, assetConfig);
-                    console.log(`📊 ${displayName} - ${signal.bias} (${signal.confidence}%) - ${signal.reasons[0]}`);
-                    if (signal.bias !== 'WAIT' && signal.confidence >= 55) {
+                    console.log(`📊 ${displayName} - ${signal.bias} | ${signal.grade} (${signal.score}pts) | ${signal.confidence}%`);
+                    
+                    // ONLY send B grade or higher (60+ points)
+                    if (signal.bias !== 'WAIT' && signal.grade === 'B' || signal.grade === 'A' || signal.grade === 'A+') {
                         const tradeLevels = calculateTradeLevels(signal.currentPrice, signal.bias, assetConfig, candles);
                         if (tradeLevels && parseFloat(tradeLevels.rrRatio) >= 2.0) {
                             await sendTelegramAlert(displayName, signal, tradeLevels, assetConfig);
                         } else {
                             console.log(`⏸️ ${displayName} skipped - RR ${tradeLevels?.rrRatio} below 2:1`);
                         }
+                    } else if (signal.bias !== 'WAIT') {
+                        console.log(`⏸️ ${displayName} skipped - Grade ${signal.grade} (below B threshold)`);
                     }
                 }
             }
@@ -802,16 +1037,16 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
 }
 
 async function main() {
-    console.log('--- OMNI-SIGNAL SCALPING OPTIMIZED ---');
+    console.log('--- OMNI-SIGNAL SCALPING OPTIMIZED (SCORING SYSTEM) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
     console.log(`Alpha Vantage: ${!!ALPHA_VANTAGE_KEY ? '✅' : '❌'}`);
     console.log(`Mode: SCALP | Balance: $${DEFAULT_BALANCE} | Risk: ${DEFAULT_RISK_PERCENT}%`);
-    console.log(`🔧 Features:`);
-    console.log(`   - 1:2 MINIMUM Risk/Reward`);
-    console.log(`   - Asset-appropriate stops (Gold: $12-25, BTC: $800-2000)`);
-    console.log(`   - Duplicate signal prevention (1 hour)`);
-    console.log(`   - 15 min cooldown between alerts`);
-    console.log(`   - Lower confidence threshold (55% for scalping)`);
+    console.log(`🔧 SCORING SYSTEM RULES:`);
+    console.log(`   - A+ (80-100pts): Full lot size | A (70-79pts): Full lot size`);
+    console.log(`   - B (60-69pts): 75% lot size | C (50-59pts): ❌ NO SEND`);
+    console.log(`   - Minimum threshold: 60 points (B grade)`);
+    console.log(`   - Minimum RR: 1:2`);
+    console.log(`   - Duplicate prevention: 1 hour | Cooldown: 15 min`);
 
     let eurusd, gbpusd, usdjpy, usdcad, usdchf, usdsek;
     try {
