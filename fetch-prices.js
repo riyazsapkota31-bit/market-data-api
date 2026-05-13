@@ -1,5 +1,5 @@
-// fetch-prices.js – SCALPING OPTIMIZED v4
-// 65-75% win rate target | 1:2 RR minimum | 4-5 winning trades daily
+// fetch-prices.js – SCALPING OPTIMIZED v5
+// 65-75% win rate target | RR: 1:2 minimum, up to 1:5 | 4-5 winning trades daily
 
 const fs = require('fs');
 const path = require('path');
@@ -22,25 +22,25 @@ let oilRunCounter = 0;
 // ========== ASSET CONFIGURATIONS ==========
 const ASSET_CONFIGS = {
     // FOREX
-    eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 },
-    gbpusd: { multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex', minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 },
-    usdjpy: { multiplier: 100, spread: 0.03, digits: 3, class: 'forex', minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 },
-    usdcad: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 },
-    usdchf: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 },
-    usdsek: { multiplier: 10000, spread: 0.0003, digits: 5, class: 'forex', minStopPips: 20, maxStopPips: 40, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 },
+    eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0 },
+    gbpusd: { multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex', minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.6, maxLot: 5.0 },
+    usdjpy: { multiplier: 100, spread: 0.03, digits: 3, class: 'forex', minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.6, maxLot: 5.0 },
+    usdcad: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0 },
+    usdchf: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0 },
+    usdsek: { multiplier: 10000, spread: 0.0003, digits: 5, class: 'forex', minStopPips: 20, maxStopPips: 40, atrMultiplier: 0.6, maxLot: 5.0 },
     
     // CRYPTO
-    btcusd: { multiplier: 10, spread: 75.00, digits: 0, class: 'crypto', minStopPips: 1000, maxStopPips: 2500, atrMultiplier: 0.8, tpMultiplier: 2.0, maxLot: 0.5 },
-    ethusd: { multiplier: 10, spread: 6.00, digits: 0, class: 'crypto', minStopPips: 60, maxStopPips: 150, atrMultiplier: 0.8, tpMultiplier: 2.0, maxLot: 5.0 },
-    solusd: { multiplier: 10, spread: 0.50, digits: 2, class: 'crypto', minStopPips: 6, maxStopPips: 20, atrMultiplier: 0.8, tpMultiplier: 2.0, maxLot: 50.0 },
+    btcusd: { multiplier: 10, spread: 75.00, digits: 0, class: 'crypto', minStopPips: 1000, maxStopPips: 2500, atrMultiplier: 0.8, maxLot: 0.5 },
+    ethusd: { multiplier: 10, spread: 6.00, digits: 0, class: 'crypto', minStopPips: 60, maxStopPips: 150, atrMultiplier: 0.8, maxLot: 5.0 },
+    solusd: { multiplier: 10, spread: 0.50, digits: 2, class: 'crypto', minStopPips: 6, maxStopPips: 20, atrMultiplier: 0.8, maxLot: 50.0 },
     
     // METALS
-    xauusd: { multiplier: 100, spread: 0.35, digits: 2, class: 'commodities', minStopPips: 15.0, maxStopPips: 35.0, atrMultiplier: 0.8, tpMultiplier: 2.0, maxLot: 0.5 },
-    xagusd: { multiplier: 100, spread: 0.04, digits: 3, class: 'commodities', minStopPips: 0.50, maxStopPips: 1.20, atrMultiplier: 0.8, tpMultiplier: 2.0, maxLot: 0.5 },
+    xauusd: { multiplier: 100, spread: 0.35, digits: 2, class: 'commodities', minStopPips: 15.0, maxStopPips: 35.0, atrMultiplier: 0.8, maxLot: 0.5 },
+    xagusd: { multiplier: 100, spread: 0.04, digits: 3, class: 'commodities', minStopPips: 0.50, maxStopPips: 1.20, atrMultiplier: 0.8, maxLot: 0.5 },
     
     // OIL
-    wtiusd: { multiplier: 100, spread: 0.05, digits: 2, class: 'commodities', minStopPips: 0.60, maxStopPips: 1.50, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 1.0 },
-    dxy: { multiplier: 100, spread: 0.05, digits: 4, class: 'forex', minStopPips: 15, maxStopPips: 40, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 }
+    wtiusd: { multiplier: 100, spread: 0.05, digits: 2, class: 'commodities', minStopPips: 0.60, maxStopPips: 1.50, atrMultiplier: 0.6, maxLot: 1.0 },
+    dxy: { multiplier: 100, spread: 0.05, digits: 4, class: 'forex', minStopPips: 15, maxStopPips: 40, atrMultiplier: 0.6, maxLot: 5.0 }
 };
 
 // ========== UTILITY FUNCTIONS ==========
@@ -314,7 +314,7 @@ function detectLiquiditySweep(candles, level) {
     return false;
 }
 
-// ========== RETRACEMENT DETECTION (3 candles, close above level, no new lows) ==========
+// ========== RETRACEMENT DETECTION ==========
 function checkRetracement(candles, level, bias) {
     if (candles.length < 15) return false;
     const recentCandles = candles.slice(-15);
@@ -411,7 +411,7 @@ function detectCandlePattern(candles, bias) {
     return { detected: false, pattern: null };
 }
 
-// ========== SCORING SYSTEM (65-75% win rate target) ==========
+// ========== SCORING SYSTEM ==========
 function calculateSignalScore(factors) {
     let score = 0;
     let breakdown = [];
@@ -428,7 +428,6 @@ function calculateSignalScore(factors) {
         return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35, breakdown: ['Missing BOS or key level'] };
     }
     
-    // For 65%+ win rate, need BOTH retrace AND sweep
     if (hasRetrace && hasSweep) {
         score = 50;
         breakdown.push('Retrace + Sweep: 50');
@@ -504,7 +503,6 @@ function calculateSignalScore(factors) {
     score = Math.min(100, score);
     expectedWinRate = Math.min(85, expectedWinRate);
     
-    // GRADE BASED ON EXPECTED WIN RATE
     let grade = 'B';
     let passed = true;
     
@@ -533,7 +531,7 @@ function calculateSignalScore(factors) {
     return { score, grade, passed, positionMultiplier, expectedWinRate, breakdown };
 }
 
-// ========== RISK MANAGEMENT ==========
+// ========== RISK MANAGEMENT WITH EXTENDED RR ==========
 function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
     const { minStopPips, maxStopPips, atrMultiplier, spread } = assetConfig;
     
@@ -608,17 +606,95 @@ function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
     return finalStop;
 }
 
-function findLogicalTakeProfit(entry, stopLoss, bias, assetConfig) {
+// ========== EXTENDED RR: Minimum 1:2, can go up to 1:5 ==========
+function findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles) {
     const risk = Math.abs(entry - stopLoss);
     const minRR = 2.0;
-    const takeProfit = bias === 'BUY' ? entry + (risk * minRR) : entry - (risk * minRR);
-    return { takeProfit, rr: minRR.toFixed(1) };
+    const maxRR = 5.0;
+    
+    let logicalTP = null;
+    let actualRR = minRR;
+    
+    if (candles && candles.length >= 50) {
+        const recentCandles = candles.slice(-50);
+        const resistanceLevels = [];
+        const supportLevels = [];
+        
+        for (let i = 5; i < recentCandles.length - 5; i++) {
+            if (recentCandles[i].high > recentCandles[i-1].high && 
+                recentCandles[i].high > recentCandles[i+1].high &&
+                recentCandles[i].high > recentCandles[i-2].high &&
+                recentCandles[i].high > recentCandles[i+2].high) {
+                resistanceLevels.push(recentCandles[i].high);
+            }
+            if (recentCandles[i].low < recentCandles[i-1].low && 
+                recentCandles[i].low < recentCandles[i+1].low &&
+                recentCandles[i].low < recentCandles[i-2].low &&
+                recentCandles[i].low < recentCandles[i+2].low) {
+                supportLevels.push(recentCandles[i].low);
+            }
+        }
+        
+        const buffer = entry * 0.0005; // 0.05% buffer
+        
+        if (bias === 'BUY') {
+            const validResistances = resistanceLevels.filter(r => r > entry);
+            validResistances.sort((a, b) => a - b);
+            if (validResistances.length > 0) {
+                const nextResistance = validResistances[0] - buffer;
+                const potentialRR = (nextResistance - entry) / risk;
+                if (potentialRR >= minRR) {
+                    logicalTP = nextResistance;
+                    actualRR = Math.min(potentialRR, maxRR);
+                }
+            }
+        } else {
+            const validSupports = supportLevels.filter(s => s < entry);
+            validSupports.sort((a, b) => b - a);
+            if (validSupports.length > 0) {
+                const nextSupport = validSupports[0] + buffer;
+                const potentialRR = (entry - nextSupport) / risk;
+                if (potentialRR >= minRR) {
+                    logicalTP = nextSupport;
+                    actualRR = Math.min(potentialRR, maxRR);
+                }
+            }
+        }
+    }
+    
+    let takeProfit;
+    let isExtended = false;
+    
+    if (logicalTP && actualRR > minRR) {
+        takeProfit = logicalTP;
+        isExtended = true;
+    } else if (logicalTP && actualRR === minRR) {
+        takeProfit = logicalTP;
+        isExtended = false;
+    } else {
+        takeProfit = bias === 'BUY' ? entry + (risk * minRR) : entry - (risk * minRR);
+        actualRR = minRR;
+        isExtended = false;
+    }
+    
+    // If actualRR is less than minRR due to rounding, force minRR
+    if (actualRR < minRR) {
+        actualRR = minRR;
+        takeProfit = bias === 'BUY' ? entry + (risk * minRR) : entry - (risk * minRR);
+        isExtended = false;
+    }
+    
+    return { 
+        takeProfit: takeProfit, 
+        rr: actualRR.toFixed(1),
+        isExtended: isExtended
+    };
 }
 
 function calculateTradeLevels(price, bias, assetConfig, candles, positionMultiplier) {
     const stopLoss = findLogicalStopLoss(candles, price, bias, assetConfig);
     const entry = price;
-    const { takeProfit, rr } = findLogicalTakeProfit(entry, stopLoss, bias, assetConfig);
+    const { takeProfit, rr, isExtended } = findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles);
     
     if (parseFloat(rr) < 2.0) return null;
     
@@ -635,7 +711,8 @@ function calculateTradeLevels(price, bias, assetConfig, candles, positionMultipl
         sl: stopLoss.toFixed(assetConfig.digits),
         tp: takeProfit.toFixed(assetConfig.digits),
         rrRatio: rr,
-        lotSize: lotSize.toFixed(2)
+        lotSize: lotSize.toFixed(2),
+        isExtendedRR: isExtended
     };
 }
 
@@ -744,6 +821,8 @@ async function sendTelegramAlert(symbolDisplay, signal, tradeLevels, assetConfig
     const session = getCurrentSession();
     const timestamp = new Date().toLocaleString();
     
+    const rrDisplay = tradeLevels.isExtendedRR ? `1:${tradeLevels.rrRatio} 🚀 EXTENDED` : `1:${tradeLevels.rrRatio}`;
+    
     const message = `
 🤖 OMNI-SIGNAL ALERT 🤖
 ━━━━━━━━━━━━━━━━━━━
@@ -761,7 +840,7 @@ ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.grade} (${signal.
 📥 Entry: ${tradeLevels.entry}
 🛑 Stop: ${tradeLevels.sl}
 🎯 TP: ${tradeLevels.tp}
-📐 RR: 1:${tradeLevels.rrRatio}
+📐 RR: ${rrDisplay}
 💰 Lot: ${tradeLevels.lotSize}
 
 ⚠️ Mode: SCALP | Risk: 1% | Balance: $${DEFAULT_BALANCE}
@@ -775,7 +854,7 @@ ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.grade} (${signal.
         });
         const json = await res.json();
         if (json.ok) {
-            console.log(`✅ ${symbolDisplay} ${signal.grade} (${signal.expectedWinRate}% WR)`);
+            console.log(`✅ ${symbolDisplay} ${signal.grade} | RR:${tradeLevels.rrRatio} | ${signal.expectedWinRate}% WR`);
             setCooldown(symbolDisplay, signal.bias);
             return true;
         }
@@ -877,9 +956,9 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
 }
 
 async function main() {
-    console.log('--- OMNI-SIGNAL v4 (65-75% Win Rate Target | 1:2 RR) ---');
+    console.log('--- OMNI-SIGNAL v5 (Extended RR: 1:2 to 1:5 | 65-75% WR Target) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
-    console.log(`Rules: Retrace + Sweep REQUIRED | Minor = 70% size | Major = 100% size`);
+    console.log(`Rules: Retrace + Sweep REQUIRED | RR minimum 1:2, up to 1:5 | Minor = 70% size`);
 
     let eurusd, gbpusd, usdjpy, usdcad, usdchf, usdsek;
     try {
