@@ -1469,8 +1469,15 @@
       "high": 2285.99,
       "low": 2285.94,
       "close": 2285.94
+    },
+    {
+      "timestamp": 1778677832307,
+      "open": 2285.85,
+      "high": 2286.3,
+      "low": 2285.7,
+      "close": 2286.3
     }
   ],
-  "currentPrice": 2285.94,
-  "timestamp": 1778677832308
+  "currentPrice": 2286.3,
+  "timestamp": 1778678191061
 }
