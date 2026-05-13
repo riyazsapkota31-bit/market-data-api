@@ -1,5 +1,5 @@
-// fetch-prices.js – SCALPING OPTIMIZED with SCORING SYSTEM (60+ points = B grade minimum)
-// Features: No C trades | Score breakdown | Dynamic lot sizing | 1:2+ RR
+// fetch-prices.js – SCALPING OPTIMIZED v4
+// 65-75% win rate target | 1:2 RR minimum | 4-5 winning trades daily
 
 const fs = require('fs');
 const path = require('path');
@@ -19,70 +19,31 @@ const COOLDOWN_FILE = path.join(dataDir, 'cooldown.json');
 const SIGNAL_TRACKING_FILE = path.join(dataDir, 'signal_tracking.json');
 let oilRunCounter = 0;
 
-// ========== ASSET-SPECIFIC REASONABLE LEVELS (1:2 MIN RR) ==========
+// ========== ASSET CONFIGURATIONS ==========
 const ASSET_CONFIGS = {
-    // FOREX (1:2 RR, 15-30 pip stops)
-    eurusd: { 
-        multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex',
-        minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.5, tpMultiplier: 2.0, maxLot: 5.0
-    },
-    gbpusd: { 
-        multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex',
-        minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.5, tpMultiplier: 2.0, maxLot: 5.0
-    },
-    usdjpy: { 
-        multiplier: 100, spread: 0.03, digits: 3, class: 'forex',
-        minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.5, tpMultiplier: 2.0, maxLot: 5.0
-    },
-    usdcad: { 
-        multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex',
-        minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.5, tpMultiplier: 2.0, maxLot: 5.0
-    },
-    usdchf: { 
-        multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex',
-        minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.5, tpMultiplier: 2.0, maxLot: 5.0
-    },
-    usdsek: { 
-        multiplier: 10000, spread: 0.0003, digits: 5, class: 'forex',
-        minStopPips: 20, maxStopPips: 40, atrMultiplier: 0.5, tpMultiplier: 2.0, maxLot: 5.0
-    },
+    // FOREX
+    eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 },
+    gbpusd: { multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex', minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 },
+    usdjpy: { multiplier: 100, spread: 0.03, digits: 3, class: 'forex', minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 },
+    usdcad: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 },
+    usdchf: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 },
+    usdsek: { multiplier: 10000, spread: 0.0003, digits: 5, class: 'forex', minStopPips: 20, maxStopPips: 40, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 },
     
-    // CRYPTO (1:2.5 RR, wider stops for volatility)
-    btcusd: { 
-        multiplier: 10, spread: 75.00, digits: 0, class: 'crypto',
-        minStopPips: 800, maxStopPips: 2000, atrMultiplier: 0.6, tpMultiplier: 2.5, maxLot: 0.5
-    },
-    ethusd: { 
-        multiplier: 10, spread: 6.00, digits: 0, class: 'crypto',
-        minStopPips: 50, maxStopPips: 120, atrMultiplier: 0.6, tpMultiplier: 2.5, maxLot: 5.0
-    },
-    solusd: { 
-        multiplier: 10, spread: 0.50, digits: 2, class: 'crypto',
-        minStopPips: 5, maxStopPips: 15, atrMultiplier: 0.6, tpMultiplier: 2.5, maxLot: 50.0
-    },
+    // CRYPTO
+    btcusd: { multiplier: 10, spread: 75.00, digits: 0, class: 'crypto', minStopPips: 1000, maxStopPips: 2500, atrMultiplier: 0.8, tpMultiplier: 2.0, maxLot: 0.5 },
+    ethusd: { multiplier: 10, spread: 6.00, digits: 0, class: 'crypto', minStopPips: 60, maxStopPips: 150, atrMultiplier: 0.8, tpMultiplier: 2.0, maxLot: 5.0 },
+    solusd: { multiplier: 10, spread: 0.50, digits: 2, class: 'crypto', minStopPips: 6, maxStopPips: 20, atrMultiplier: 0.8, tpMultiplier: 2.0, maxLot: 50.0 },
     
-    // METALS (1:2 RR, Gold needs wider stop!)
-    xauusd: { 
-        multiplier: 100, spread: 0.35, digits: 2, class: 'commodities',
-        minStopPips: 12.0, maxStopPips: 25.0, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 0.5
-    },
-    xagusd: { 
-        multiplier: 100, spread: 0.04, digits: 3, class: 'commodities',
-        minStopPips: 0.40, maxStopPips: 1.00, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 0.5
-    },
+    // METALS
+    xauusd: { multiplier: 100, spread: 0.35, digits: 2, class: 'commodities', minStopPips: 15.0, maxStopPips: 35.0, atrMultiplier: 0.8, tpMultiplier: 2.0, maxLot: 0.5 },
+    xagusd: { multiplier: 100, spread: 0.04, digits: 3, class: 'commodities', minStopPips: 0.50, maxStopPips: 1.20, atrMultiplier: 0.8, tpMultiplier: 2.0, maxLot: 0.5 },
     
-    // OIL (1:2 RR)
-    wtiusd: { 
-        multiplier: 100, spread: 0.05, digits: 2, class: 'commodities',
-        minStopPips: 0.60, maxStopPips: 1.50, atrMultiplier: 0.5, tpMultiplier: 2.0, maxLot: 1.0
-    },
-    dxy: { 
-        multiplier: 100, spread: 0.05, digits: 4, class: 'forex',
-        minStopPips: 15, maxStopPips: 40, atrMultiplier: 0.5, tpMultiplier: 2.0, maxLot: 5.0
-    }
+    // OIL
+    wtiusd: { multiplier: 100, spread: 0.05, digits: 2, class: 'commodities', minStopPips: 0.60, maxStopPips: 1.50, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 1.0 },
+    dxy: { multiplier: 100, spread: 0.05, digits: 4, class: 'forex', minStopPips: 15, maxStopPips: 40, atrMultiplier: 0.6, tpMultiplier: 2.0, maxLot: 5.0 }
 };
 
-// ========== DUPLICATE SIGNAL PREVENTION ==========
+// ========== UTILITY FUNCTIONS ==========
 function loadSignalTracking() {
     if (fs.existsSync(SIGNAL_TRACKING_FILE)) {
         try { return JSON.parse(fs.readFileSync(SIGNAL_TRACKING_FILE)); } catch(e) {}
@@ -112,7 +73,7 @@ function isDuplicateSignal(symbol, bias, currentPrice) {
     if (tracking.signals[key]) {
         const timeSince = now - tracking.signals[key];
         if (timeSince < 60 * 60 * 1000) {
-            console.log(`⏸️ Duplicate blocked: ${symbol} ${bias} (${Math.round(timeSince/60000)} mins ago)`);
+            console.log(`⏸️ Duplicate blocked: ${symbol} ${bias}`);
             return true;
         }
     }
@@ -146,11 +107,11 @@ function setCooldown(symbol, bias) {
     saveCooldown(cooldown);
 }
 
-async function fetchJSON(url, timeout = 10000, headers = {}) {
+async function fetchJSON(url, timeout = 10000) {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
     try {
-        const res = await fetch(url, { signal: controller.signal, headers });
+        const res = await fetch(url, { signal: controller.signal });
         clearTimeout(id);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return await res.json();
@@ -228,11 +189,9 @@ function getSessionMultiplier() {
     const now = new Date();
     const utcHour = now.getUTCHours();
     const utcMinute = now.getUTCMinutes();
-    
     if ((utcHour === 7 && utcMinute < 30) || (utcHour === 12 && utcMinute < 30)) return 1.5;
     if ((utcHour >= 7 && utcHour < 16) || (utcHour >= 12 && utcHour < 20)) return 1.0;
-    if (utcHour >= 23 || utcHour < 7) return 0.5;
-    return 0.3;
+    return 0.5;
 }
 
 function getCurrentSession() {
@@ -243,45 +202,58 @@ function getCurrentSession() {
     return 'OFF_HOURS';
 }
 
+// ========== KEY LEVEL DETECTION ==========
 function getKeyLevels(candles, currentPrice) {
     const levels = [];
     
+    // MAJOR LEVELS (Daily)
     const dayCandles = candles.slice(-288);
     if (dayCandles.length > 0) {
-        levels.push({ price: Math.max(...dayCandles.map(c => c.high)), type: 'MAJOR_RESISTANCE', strength: 'MAJOR' });
-        levels.push({ price: Math.min(...dayCandles.map(c => c.low)), type: 'MAJOR_SUPPORT', strength: 'MAJOR' });
+        levels.push({ price: Math.max(...dayCandles.map(c => c.high)), type: 'RESISTANCE', strength: 'MAJOR' });
+        levels.push({ price: Math.min(...dayCandles.map(c => c.low)), type: 'SUPPORT', strength: 'MAJOR' });
     }
     
-    for (let i = 10; i < candles.length - 10; i++) {
-        if (candles[i].high > candles[i-5].high && candles[i].high > candles[i+5].high) {
-            levels.push({ price: candles[i].high, type: 'MINOR_RESISTANCE', strength: 'MINOR' });
-        }
-        if (candles[i].low < candles[i-5].low && candles[i].low < candles[i+5].low) {
-            levels.push({ price: candles[i].low, type: 'MINOR_SUPPORT', strength: 'MINOR' });
-        }
+    // WEEKLY LEVELS
+    if (candles.length >= 1440) {
+        const weekCandles = candles.slice(-1440);
+        levels.push({ price: Math.max(...weekCandles.map(c => c.high)), type: 'RESISTANCE', strength: 'MAJOR' });
+        levels.push({ price: Math.min(...weekCandles.map(c => c.low)), type: 'SUPPORT', strength: 'MAJOR' });
     }
     
-    const roundNumber = Math.round(currentPrice / (currentPrice > 100 ? 100 : 10)) * (currentPrice > 100 ? 100 : 10);
-    levels.push({ price: roundNumber, type: 'ROUND_NUMBER', strength: 'MINOR' });
+    // MINOR LEVELS
+    for (let i = 15; i < candles.length - 15; i++) {
+        const isSwingHigh = candles[i].high > candles[i-5].high && candles[i].high > candles[i-10].high &&
+                            candles[i].high > candles[i+5].high && candles[i].high > candles[i+10].high;
+        const isSwingLow = candles[i].low < candles[i-5].low && candles[i].low < candles[i-10].low &&
+                           candles[i].low < candles[i+5].low && candles[i].low < candles[i+10].low;
+        if (isSwingHigh) levels.push({ price: candles[i].high, type: 'RESISTANCE', strength: 'MINOR' });
+        if (isSwingLow) levels.push({ price: candles[i].low, type: 'SUPPORT', strength: 'MINOR' });
+    }
     
+    // ROUND NUMBERS
+    const roundNumber = Math.round(currentPrice / 10) * 10;
+    levels.push({ price: roundNumber, type: 'ROUND_NUMBER', strength: 'ROUND' });
+    
+    // Remove duplicates
     const unique = [];
     for (const level of levels) {
         let duplicate = false;
         for (const existing of unique) {
-            if (Math.abs(existing.price - level.price) / level.price < 0.001) {
+            if (Math.abs(existing.price - level.price) / level.price < 0.0005) {
                 duplicate = true;
                 break;
             }
         }
         if (!duplicate) unique.push(level);
     }
+    
     return unique;
 }
 
 function isAtSupport(price, levels) {
     for (const level of levels) {
-        if (level.type.includes('SUPPORT') && Math.abs(price - level.price) / price < 0.001) {
-            return { atLevel: true, level: level.price, type: level.strength };
+        if (level.type === 'SUPPORT' && Math.abs(price - level.price) / price < 0.0005) {
+            return { atLevel: true, level: level.price, strength: level.strength };
         }
     }
     return { atLevel: false };
@@ -289,13 +261,14 @@ function isAtSupport(price, levels) {
 
 function isAtResistance(price, levels) {
     for (const level of levels) {
-        if (level.type.includes('RESISTANCE') && Math.abs(price - level.price) / price < 0.001) {
-            return { atLevel: true, level: level.price, type: level.strength };
+        if (level.type === 'RESISTANCE' && Math.abs(price - level.price) / price < 0.0005) {
+            return { atLevel: true, level: level.price, strength: level.strength };
         }
     }
     return { atLevel: false };
 }
 
+// ========== PATTERN DETECTION ==========
 function detectBOS(candles) {
     if (candles.length < 30) return null;
     const highs = candles.map(c => c.high);
@@ -315,7 +288,6 @@ function detectFVG(candles) {
     const c1 = candles[candles.length - 3];
     const c2 = candles[candles.length - 2];
     const c3 = candles[candles.length - 1];
-    
     if (c1.high < c3.low) return { type: 'BULLISH', level: c1.high, level2: c3.low };
     if (c3.high < c1.low) return { type: 'BEARISH', level: c3.high, level2: c1.low };
     return null;
@@ -325,7 +297,6 @@ function detectOrderBlock(candles) {
     if (candles.length < 3) return null;
     const prev = candles[candles.length - 2];
     const last = candles[candles.length - 1];
-    
     if (prev.close < prev.open && last.close > last.open && last.close > prev.high) {
         return { type: 'BULLISH', level: prev.low };
     }
@@ -343,443 +314,334 @@ function detectLiquiditySweep(candles, level) {
     return false;
 }
 
+// ========== RETRACEMENT DETECTION (3 candles, close above level, no new lows) ==========
 function checkRetracement(candles, level, bias) {
-    if (candles.length < 6) return false;
+    if (candles.length < 15) return false;
+    const recentCandles = candles.slice(-15);
     
-    let touchCandleIndex = -1;
-    for (let i = candles.length - 1; i >= 0; i--) {
-        if (bias === 'BUY' && candles[i].low <= level) {
-            touchCandleIndex = i;
+    let sweepIndex = -1;
+    for (let i = recentCandles.length - 1; i >= 0; i--) {
+        if (bias === 'BUY' && recentCandles[i].low <= level) {
+            sweepIndex = i;
             break;
         }
-        if (bias === 'SELL' && candles[i].high >= level) {
-            touchCandleIndex = i;
+        if (bias === 'SELL' && recentCandles[i].high >= level) {
+            sweepIndex = i;
             break;
         }
     }
     
-    if (touchCandleIndex === -1 || touchCandleIndex === candles.length - 1) return false;
-    
-    const candlesAfter = candles.slice(touchCandleIndex + 1);
-    if (candlesAfter.length < 2) return false;
+    if (sweepIndex === -1 || sweepIndex >= recentCandles.length - 4) return false;
+    const afterSweep = recentCandles.slice(sweepIndex + 1);
+    if (afterSweep.length < 3) return false;
     
     if (bias === 'BUY') {
-        const firstCandleBullish = candlesAfter[0].close > candlesAfter[0].open;
-        const secondCandleHigher = candlesAfter[1].close > candlesAfter[0].close;
-        const priceMovedUp = (candlesAfter[1].close - level) / level > 0.0005;
-        return firstCandleBullish && secondCandleHigher && priceMovedUp;
+        let bullishCount = 0;
+        for (let i = 0; i < afterSweep.length; i++) {
+            if (afterSweep[i].close > afterSweep[i].open) bullishCount++;
+            else break;
+        }
+        const closedAbove = afterSweep[afterSweep.length-1].close > level;
+        const priceMovedUp = (afterSweep[afterSweep.length-1].close - level) / level > 0.0015;
+        const lowestAfter = Math.min(...afterSweep.map(c => c.low));
+        const noNewLow = lowestAfter > level - (level * 0.0005);
+        return bullishCount >= 2 && closedAbove && priceMovedUp && noNewLow;
     } else {
-        const firstCandleBearish = candlesAfter[0].close < candlesAfter[0].open;
-        const secondCandleLower = candlesAfter[1].close < candlesAfter[0].close;
-        const priceMovedDown = (level - candlesAfter[1].close) / level > 0.0005;
-        return firstCandleBearish && secondCandleLower && priceMovedDown;
+        let bearishCount = 0;
+        for (let i = 0; i < afterSweep.length; i++) {
+            if (afterSweep[i].close < afterSweep[i].open) bearishCount++;
+            else break;
+        }
+        const closedBelow = afterSweep[afterSweep.length-1].close < level;
+        const priceMovedDown = (level - afterSweep[afterSweep.length-1].close) / level > 0.0015;
+        const highestAfter = Math.max(...afterSweep.map(c => c.high));
+        const noNewHigh = highestAfter < level + (level * 0.0005);
+        return bearishCount >= 2 && closedBelow && priceMovedDown && noNewHigh;
     }
 }
 
 function detectMSS(candles, bias) {
-    if (candles.length < 15) return { detected: false, strength: 0 };
+    if (candles.length < 20) return { detected: false, strength: 0 };
+    const recentCandles = candles.slice(-18);
+    let lastSwingHigh = -Infinity, lastSwingLow = Infinity, swingIndex = -1;
     
-    const recentCandles = candles.slice(-12);
-    const highs = recentCandles.map(c => c.high);
-    const lows = recentCandles.map(c => c.low);
-    
-    let lastSwingHigh = -Infinity;
-    let lastSwingLow = Infinity;
-    let swingIndex = -1;
-    
-    for (let i = 3; i < recentCandles.length - 3; i++) {
-        const isSwingHigh = recentCandles[i].high > recentCandles[i-1].high && 
-                            recentCandles[i].high > recentCandles[i-2].high &&
-                            recentCandles[i].high > recentCandles[i+1].high &&
-                            recentCandles[i].high > recentCandles[i+2].high;
-        const isSwingLow = recentCandles[i].low < recentCandles[i-1].low && 
-                           recentCandles[i].low < recentCandles[i-2].low &&
-                           recentCandles[i].low < recentCandles[i+1].low &&
-                           recentCandles[i].low < recentCandles[i+2].low;
-        
-        if (isSwingHigh && recentCandles[i].high > lastSwingHigh) {
-            lastSwingHigh = recentCandles[i].high;
-            swingIndex = i;
-        }
-        if (isSwingLow && recentCandles[i].low < lastSwingLow) {
-            lastSwingLow = recentCandles[i].low;
-            swingIndex = i;
-        }
+    for (let i = 4; i < recentCandles.length - 4; i++) {
+        const isSwingHigh = recentCandles[i].high > recentCandles[i-1].high && recentCandles[i].high > recentCandles[i-2].high &&
+                            recentCandles[i].high > recentCandles[i+1].high && recentCandles[i].high > recentCandles[i+2].high;
+        const isSwingLow = recentCandles[i].low < recentCandles[i-1].low && recentCandles[i].low < recentCandles[i-2].low &&
+                           recentCandles[i].low < recentCandles[i+1].low && recentCandles[i].low < recentCandles[i+2].low;
+        if (isSwingHigh && recentCandles[i].high > lastSwingHigh) { lastSwingHigh = recentCandles[i].high; swingIndex = i; }
+        if (isSwingLow && recentCandles[i].low < lastSwingLow) { lastSwingLow = recentCandles[i].low; swingIndex = i; }
     }
     
-    if (swingIndex === -1 || swingIndex >= recentCandles.length - 2) {
-        return { detected: false, strength: 0 };
-    }
-    
+    if (swingIndex === -1 || swingIndex >= recentCandles.length - 3) return { detected: false, strength: 0 };
     const candlesAfter = recentCandles.slice(swingIndex + 1);
-    if (candlesAfter.length < 2) return { detected: false, strength: 0 };
+    if (candlesAfter.length < 3) return { detected: false, strength: 0 };
     
     if (bias === 'BUY') {
-        const brokeLow = lastSwingLow < Math.min(...lows.slice(0, -3));
-        const higherLow = candlesAfter[0].low > lastSwingLow;
+        const higherLow = Math.min(...candlesAfter.map(c => c.low)) > lastSwingLow;
         const higherHigh = Math.max(...candlesAfter.map(c => c.high)) > lastSwingHigh;
-        
-        if (brokeLow && higherLow && higherHigh) {
-            return { detected: true, strength: 80 };
-        }
-        if (higherLow && higherHigh) {
-            return { detected: true, strength: 60 };
-        }
+        if (higherLow && higherHigh) return { detected: true, strength: higherHigh && higherLow ? 80 : 60 };
     } else {
-        const brokeHigh = lastSwingHigh > Math.max(...highs.slice(0, -3));
-        const lowerHigh = candlesAfter[0].high < lastSwingHigh;
+        const lowerHigh = Math.max(...candlesAfter.map(c => c.high)) < lastSwingHigh;
         const lowerLow = Math.min(...candlesAfter.map(c => c.low)) < lastSwingLow;
-        
-        if (brokeHigh && lowerHigh && lowerLow) {
-            return { detected: true, strength: 80 };
-        }
-        if (lowerHigh && lowerLow) {
-            return { detected: true, strength: 60 };
-        }
+        if (lowerHigh && lowerLow) return { detected: true, strength: lowerHigh && lowerLow ? 80 : 60 };
     }
-    
     return { detected: false, strength: 0 };
 }
 
 function detectCandlePattern(candles, bias) {
-    if (candles.length < 2) return { detected: false, pattern: null, strength: 0 };
-    
+    if (candles.length < 2) return { detected: false, pattern: null };
     const last = candles[candles.length - 1];
     const prev = candles[candles.length - 2];
     
     if (bias === 'BUY') {
-        const bullishEngulfing = prev.close < prev.open && 
-                                  last.close > last.open &&
-                                  last.close > prev.open &&
-                                  last.open < prev.close;
-        if (bullishEngulfing) {
-            return { detected: true, pattern: 'BULLISH_ENGULFING', strength: 75 };
-        }
-        
+        const bullishEngulfing = prev.close < prev.open && last.close > last.open && last.close > prev.open && last.open < prev.close;
+        if (bullishEngulfing) return { detected: true, pattern: 'BULLISH_ENGULFING' };
         const bodySize = Math.abs(last.close - last.open);
         const lowerWick = Math.min(last.open, last.close) - last.low;
-        const bullishPinBar = lowerWick > bodySize * 2 && last.close > last.open;
-        if (bullishPinBar) {
-            return { detected: true, pattern: 'BULLISH_PINBAR', strength: 70 };
-        }
+        if (lowerWick > bodySize * 2 && last.close > last.open) return { detected: true, pattern: 'BULLISH_PINBAR' };
     } else {
-        const bearishEngulfing = prev.close > prev.open && 
-                                  last.close < last.open &&
-                                  last.close < prev.open &&
-                                  last.open > prev.close;
-        if (bearishEngulfing) {
-            return { detected: true, pattern: 'BEARISH_ENGULFING', strength: 75 };
-        }
-        
+        const bearishEngulfing = prev.close > prev.open && last.close < last.open && last.close < prev.open && last.open > prev.close;
+        if (bearishEngulfing) return { detected: true, pattern: 'BEARISH_ENGULFING' };
         const bodySize = Math.abs(last.close - last.open);
         const upperWick = last.high - Math.max(last.open, last.close);
-        const bearishPinBar = upperWick > bodySize * 2 && last.close < last.open;
-        if (bearishPinBar) {
-            return { detected: true, pattern: 'BEARISH_PINBAR', strength: 70 };
-        }
+        if (upperWick > bodySize * 2 && last.close < last.open) return { detected: true, pattern: 'BEARISH_PINBAR' };
     }
-    
-    return { detected: false, pattern: null, strength: 0 };
+    return { detected: false, pattern: null };
 }
 
-// ========== SCORING SYSTEM (60+ points = B grade minimum) ==========
+// ========== SCORING SYSTEM (65-75% win rate target) ==========
 function calculateSignalScore(factors) {
     let score = 0;
     let breakdown = [];
+    let positionMultiplier = 1.0;
+    let expectedWinRate = 50;
     
-    // Core requirements (must have these to even consider)
-    if (!factors.bos || !factors.atLevel) {
-        return { score: 0, breakdown: ['Missing BOS or key level'], passed: false, grade: 'F', recommendedLotPercent: 0 };
+    const hasBOS = factors.bos;
+    const hasKeyLevel = factors.atLevel;
+    const hasRetrace = factors.retraced;
+    const hasSweep = factors.sweep;
+    
+    // CORE REQUIREMENTS
+    if (!hasBOS || !hasKeyLevel) {
+        return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35, breakdown: ['Missing BOS or key level'] };
     }
     
-    // BOS (required - 25 points)
-    if (factors.bos) {
+    // For 65%+ win rate, need BOTH retrace AND sweep
+    if (hasRetrace && hasSweep) {
+        score = 50;
+        breakdown.push('Retrace + Sweep: 50');
+    } else if (hasRetrace || hasSweep) {
+        score = 35;
+        breakdown.push(`${hasRetrace ? 'Retrace' : 'Sweep'} only: 35`);
+        expectedWinRate = 55;
+    } else {
+        return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35, breakdown: ['Missing retrace and sweep'] };
+    }
+    
+    // LEVEL STRENGTH
+    const levelStrength = factors.levelStrength || 'MINOR';
+    
+    if (levelStrength === 'MAJOR') {
         score += 25;
-        breakdown.push('BOS: 25');
+        positionMultiplier = 1.0;
+        expectedWinRate = 78;
+        breakdown.push('MAJOR level: +25 → 78% WR expected');
+    } else if (levelStrength === 'MINOR') {
+        score += 0;
+        positionMultiplier = 0.7;
+        expectedWinRate = 62;
+        breakdown.push('MINOR level: 0 → 62% WR expected (70% size)');
+    } else if (levelStrength === 'ROUND') {
+        score += 10;
+        positionMultiplier = 0.85;
+        expectedWinRate = 70;
+        breakdown.push('Round number: +10 → 70% WR expected (85% size)');
     }
     
-    // At key level (required - 15 points)
-    if (factors.atLevel) {
-        score += 15;
-        breakdown.push('Key level: 15');
-    }
-    
-    // Retracement (20 points)
-    if (factors.retraced) {
-        score += 20;
-        breakdown.push('Retracement: 20');
-    }
-    
-    // Liquidity Sweep (20 points)
-    if (factors.sweep) {
-        score += 20;
-        breakdown.push('Liquidity sweep: 20');
-    }
-    
-    // MSS/CHoCH (15 points)
+    // MSS BONUS
     if (factors.mss && factors.mss.detected) {
-        score += 15;
-        breakdown.push(`MSS: 15`);
+        if (factors.mss.strength >= 80) {
+            score += 15;
+            expectedWinRate = Math.min(85, expectedWinRate + 8);
+            breakdown.push(`MSS strong (80): +15 → +8% WR`);
+        } else {
+            score += 8;
+            expectedWinRate = Math.min(85, expectedWinRate + 4);
+            breakdown.push(`MSS weak (60): +8 → +4% WR`);
+        }
     }
     
-    // Candle Pattern (10 points)
+    // CANDLE PATTERN
     if (factors.candlePattern && factors.candlePattern.detected) {
         score += 10;
-        breakdown.push(`${factors.candlePattern.pattern}: 10`);
+        expectedWinRate = Math.min(85, expectedWinRate + 5);
+        breakdown.push(`${factors.candlePattern.pattern}: +10 → +5% WR`);
     }
     
-    // FVG (10 points)
+    // FVG
     if (factors.fvg) {
-        score += 10;
-        breakdown.push('FVG: 10');
+        score += 8;
+        expectedWinRate = Math.min(85, expectedWinRate + 3);
+        breakdown.push('FVG: +8 → +3% WR');
     }
     
-    // Order Block (10 points)
+    // ORDER BLOCK
     if (factors.ob) {
-        score += 10;
-        breakdown.push('Order block: 10');
-    }
-    
-    // Session boost (+5)
-    if (factors.sessionBoost) {
         score += 5;
-        breakdown.push('London/NY session: +5');
+        expectedWinRate = Math.min(85, expectedWinRate + 2);
+        breakdown.push('Order block: +5 → +2% WR');
     }
     
-    // Cap at 100
+    // SESSION BOOST
+    if (factors.sessionBoost && levelStrength !== 'MINOR') {
+        score += 5;
+        expectedWinRate = Math.min(85, expectedWinRate + 2);
+        breakdown.push('London/NY: +5 → +2% WR');
+    }
+    
     score = Math.min(100, score);
+    expectedWinRate = Math.min(85, expectedWinRate);
     
-    // Determine grade (60 points minimum to PASS)
-    let grade = 'F';
-    let passed = false;
-    let recommendedLotPercent = 0;
+    // GRADE BASED ON EXPECTED WIN RATE
+    let grade = 'B';
+    let passed = true;
     
-    if (score >= 80) {
+    if (expectedWinRate >= 75) {
         grade = 'A+';
-        passed = true;
-        recommendedLotPercent = 100;
-    } else if (score >= 70) {
+        positionMultiplier = 1.0;
+    } else if (expectedWinRate >= 70) {
         grade = 'A';
-        passed = true;
-        recommendedLotPercent = 100;
-    } else if (score >= 60) {
+        positionMultiplier = 0.95;
+    } else if (expectedWinRate >= 65) {
+        grade = 'B+';
+        positionMultiplier = 0.85;
+    } else if (expectedWinRate >= 60) {
         grade = 'B';
-        passed = true;
-        recommendedLotPercent = 75;
-    } else if (score >= 50) {
-        grade = 'C';
+        positionMultiplier = 0.7;
+    } else if (expectedWinRate >= 55) {
+        grade = 'C+';
+        positionMultiplier = 0.5;
         passed = false;
-        recommendedLotPercent = 0;
     } else {
-        grade = 'D/F';
+        grade = 'REJECT';
         passed = false;
-        recommendedLotPercent = 0;
+        positionMultiplier = 0;
     }
     
-    return {
-        score: score,
-        grade: grade,
-        passed: passed,
-        recommendedLotPercent: recommendedLotPercent,
-        breakdown: breakdown
-    };
+    return { score, grade, passed, positionMultiplier, expectedWinRate, breakdown };
 }
 
+// ========== RISK MANAGEMENT ==========
 function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
-    const { minStopPips, maxStopPips, atrMultiplier, class: assetClass } = assetConfig;
+    const { minStopPips, maxStopPips, atrMultiplier, spread } = assetConfig;
     
-    let atrStop = 0;
+    let atrStop = minStopPips;
     if (candles && candles.length >= 20) {
         const recentCandles = candles.slice(-20);
-        const avgTrueRange = recentCandles.reduce((sum, c, i, arr) => {
-            if (i === 0) return 0;
-            const tr = Math.max(c.high - c.low, Math.abs(c.high - arr[i-1].close), Math.abs(c.low - arr[i-1].close));
-            return sum + tr;
-        }, 0) / (recentCandles.length - 1);
-        atrStop = avgTrueRange * atrMultiplier;
+        let sumTR = 0;
+        for (let i = 1; i < recentCandles.length; i++) {
+            const tr = Math.max(
+                recentCandles[i].high - recentCandles[i].low,
+                Math.abs(recentCandles[i].high - recentCandles[i-1].close),
+                Math.abs(recentCandles[i].low - recentCandles[i-1].close)
+            );
+            sumTR += tr;
+        }
+        const avgTR = sumTR / (recentCandles.length - 1);
+        atrStop = avgTR * atrMultiplier;
     }
     
     let swingStop = null;
-    if (candles && candles.length >= 30) {
-        const recentCandles = candles.slice(-30);
+    if (candles && candles.length >= 40) {
+        const recentCandles = candles.slice(-40);
         const swingPoints = [];
-        
-        for (let i = 2; i < recentCandles.length - 2; i++) {
-            if (recentCandles[i].low < recentCandles[i-1].low && 
-                recentCandles[i].low < recentCandles[i-2].low &&
-                recentCandles[i].low < recentCandles[i+1].low &&
-                recentCandles[i].low < recentCandles[i+2].low) {
+        for (let i = 5; i < recentCandles.length - 5; i++) {
+            if (recentCandles[i].low < recentCandles[i-1].low && recentCandles[i].low < recentCandles[i-2].low &&
+                recentCandles[i].low < recentCandles[i-3].low && recentCandles[i].low < recentCandles[i+1].low &&
+                recentCandles[i].low < recentCandles[i+2].low && recentCandles[i].low < recentCandles[i+3].low) {
                 swingPoints.push({ price: recentCandles[i].low, type: 'LOW' });
             }
-            if (recentCandles[i].high > recentCandles[i-1].high && 
-                recentCandles[i].high > recentCandles[i-2].high &&
-                recentCandles[i].high > recentCandles[i+1].high &&
-                recentCandles[i].high > recentCandles[i+2].high) {
+            if (recentCandles[i].high > recentCandles[i-1].high && recentCandles[i].high > recentCandles[i-2].high &&
+                recentCandles[i].high > recentCandles[i-3].high && recentCandles[i].high > recentCandles[i+1].high &&
+                recentCandles[i].high > recentCandles[i+2].high && recentCandles[i].high > recentCandles[i+3].high) {
                 swingPoints.push({ price: recentCandles[i].high, type: 'HIGH' });
             }
         }
         
-        const buffer = currentPrice * 0.0005;
+        const buffer = currentPrice * 0.001;
         if (bias === 'BUY') {
-            const validLows = swingPoints.filter(p => p.type === 'LOW' && p.price < currentPrice);
+            const validLows = swingPoints.filter(p => p.type === 'LOW' && p.price < currentPrice && (currentPrice - p.price) >= minStopPips);
             if (validLows.length > 0) {
-                const nearestLow = Math.max(...validLows.map(p => p.price));
-                swingStop = nearestLow - buffer;
+                validLows.sort((a, b) => (currentPrice - b.price) - (currentPrice - a.price));
+                swingStop = validLows[0].price - buffer;
             }
         } else {
-            const validHighs = swingPoints.filter(p => p.type === 'HIGH' && p.price > currentPrice);
+            const validHighs = swingPoints.filter(p => p.type === 'HIGH' && p.price > currentPrice && (p.price - currentPrice) >= minStopPips);
             if (validHighs.length > 0) {
-                const nearestHigh = Math.min(...validHighs.map(p => p.price));
-                swingStop = nearestHigh + buffer;
+                validHighs.sort((a, b) => (a.price - currentPrice) - (b.price - currentPrice));
+                swingStop = validHighs[0].price + buffer;
             }
         }
     }
     
-    let stopDistance = 0;
-    let finalStop = null;
-    
+    let finalStop, stopDistance;
     if (swingStop) {
         stopDistance = Math.abs(currentPrice - swingStop);
         finalStop = swingStop;
-    } else if (atrStop > 0) {
-        stopDistance = atrStop;
-        finalStop = bias === 'BUY' ? currentPrice - atrStop : currentPrice + atrStop;
     } else {
-        stopDistance = minStopPips;
-        finalStop = bias === 'BUY' ? currentPrice - minStopPips : currentPrice + minStopPips;
+        stopDistance = Math.max(atrStop, minStopPips);
+        finalStop = bias === 'BUY' ? currentPrice - stopDistance : currentPrice + stopDistance;
     }
     
-    let stopPips = stopDistance;
-    if (assetClass === 'forex') stopPips = stopDistance * 10000;
-    else if (assetClass === 'commodities') stopPips = stopDistance;
-    else stopPips = stopDistance;
+    if (stopDistance > maxStopPips) {
+        stopDistance = maxStopPips;
+        finalStop = bias === 'BUY' ? currentPrice - maxStopPips : currentPrice + maxStopPips;
+    }
     
-    if (stopPips < minStopPips) {
-        const adjustment = minStopPips - stopPips;
-        finalStop = bias === 'BUY' ? finalStop - adjustment : finalStop + adjustment;
-    } else if (stopPips > maxStopPips) {
-        const adjustment = stopPips - maxStopPips;
-        finalStop = bias === 'BUY' ? finalStop + adjustment : finalStop - adjustment;
+    const minSafeDistance = spread * 3;
+    if (stopDistance < minSafeDistance) {
+        finalStop = bias === 'BUY' ? currentPrice - minSafeDistance : currentPrice + minSafeDistance;
     }
     
     return finalStop;
 }
 
-function findLogicalTakeProfit(candles, currentPrice, entry, stopLoss, bias, assetConfig) {
-    const { tpMultiplier } = assetConfig;
+function findLogicalTakeProfit(entry, stopLoss, bias, assetConfig) {
     const risk = Math.abs(entry - stopLoss);
-    
-    let levelTP = null;
-    if (candles && candles.length >= 50) {
-        const recentCandles = candles.slice(-50);
-        const resistanceLevels = [];
-        const supportLevels = [];
-        
-        for (let i = 5; i < recentCandles.length - 5; i++) {
-            if (recentCandles[i].high > recentCandles[i-1].high && 
-                recentCandles[i].high > recentCandles[i+1].high &&
-                recentCandles[i].high > recentCandles[i-2].high &&
-                recentCandles[i].high > recentCandles[i+2].high) {
-                resistanceLevels.push(recentCandles[i].high);
-            }
-            if (recentCandles[i].low < recentCandles[i-1].low && 
-                recentCandles[i].low < recentCandles[i+1].low &&
-                recentCandles[i].low < recentCandles[i-2].low &&
-                recentCandles[i].low < recentCandles[i+2].low) {
-                supportLevels.push(recentCandles[i].low);
-            }
-        }
-        
-        const buffer = currentPrice * 0.0005;
-        if (bias === 'BUY') {
-            const validResistances = resistanceLevels.filter(r => r > entry);
-            validResistances.sort((a, b) => a - b);
-            if (validResistances.length > 0) {
-                levelTP = validResistances[0] - buffer;
-            }
-        } else {
-            const validSupports = supportLevels.filter(s => s < entry);
-            validSupports.sort((a, b) => b - a);
-            if (validSupports.length > 0) {
-                levelTP = validSupports[0] + buffer;
-            }
-        }
-    }
-    
-    let takeProfit = null;
-    let actualRR = 0;
     const minRR = 2.0;
-    const targetRR = Math.max(minRR, tpMultiplier);
-    
-    if (levelTP) {
-        if (bias === 'BUY') {
-            actualRR = (levelTP - entry) / risk;
-            if (actualRR >= minRR) {
-                takeProfit = levelTP;
-            } else {
-                takeProfit = entry + (risk * minRR);
-                actualRR = minRR;
-            }
-        } else {
-            actualRR = (entry - levelTP) / risk;
-            if (actualRR >= minRR) {
-                takeProfit = levelTP;
-            } else {
-                takeProfit = entry - (risk * minRR);
-                actualRR = minRR;
-            }
-        }
-    } else {
-        if (bias === 'BUY') {
-            takeProfit = entry + (risk * targetRR);
-        } else {
-            takeProfit = entry - (risk * targetRR);
-        }
-        actualRR = targetRR;
-    }
-    
-    if (actualRR > 4.0) {
-        if (bias === 'BUY') {
-            takeProfit = entry + (risk * 4.0);
-        } else {
-            takeProfit = entry - (risk * 4.0);
-        }
-        actualRR = 4.0;
-    }
-    
-    return { takeProfit, rr: actualRR.toFixed(1) };
+    const takeProfit = bias === 'BUY' ? entry + (risk * minRR) : entry - (risk * minRR);
+    return { takeProfit, rr: minRR.toFixed(1) };
 }
 
-function calculateTradeLevels(price, bias, assetConfig, candles) {
+function calculateTradeLevels(price, bias, assetConfig, candles, positionMultiplier) {
     const stopLoss = findLogicalStopLoss(candles, price, bias, assetConfig);
     const entry = price;
-    const { takeProfit, rr } = findLogicalTakeProfit(candles, price, entry, stopLoss, bias, assetConfig);
-    const riskDistance = Math.abs(entry - stopLoss);
+    const { takeProfit, rr } = findLogicalTakeProfit(entry, stopLoss, bias, assetConfig);
     
-    if (parseFloat(rr) < 2.0) {
-        console.log(`⚠️ RR ${rr} below minimum 2:1, skipping`);
-        return null;
-    }
+    if (parseFloat(rr) < 2.0) return null;
     
     const riskAmount = DEFAULT_BALANCE * (DEFAULT_RISK_PERCENT / 100);
-    const stopDistPoints = riskDistance + assetConfig.spread;
+    const stopDistPoints = Math.abs(entry - stopLoss) + assetConfig.spread;
     let lotSize = riskAmount / (stopDistPoints * assetConfig.multiplier);
     lotSize = Math.floor(lotSize * 1000) / 1000;
     lotSize = Math.max(0.01, Math.min(lotSize, assetConfig.maxLot));
+    lotSize = lotSize * positionMultiplier;
+    lotSize = Math.floor(lotSize * 1000) / 1000;
     
     return {
         entry: entry.toFixed(assetConfig.digits),
         sl: stopLoss.toFixed(assetConfig.digits),
         tp: takeProfit.toFixed(assetConfig.digits),
         rrRatio: rr,
-        lotSize: lotSize.toFixed(2),
-        riskDistance: riskDistance
+        lotSize: lotSize.toFixed(2)
     };
 }
 
-// ========== SIGNAL ANALYSIS WITH SCORING SYSTEM ==========
+// ========== SIGNAL ANALYSIS ==========
 function analyzeSignal(prices, candles, assetConfig) {
-    if (candles.length < 30) {
+    if (candles.length < 40) {
         return { bias: 'WAIT', confidence: 30, currentPrice: prices[prices.length-1] };
     }
     
@@ -787,7 +649,7 @@ function analyzeSignal(prices, candles, assetConfig) {
     const keyLevels = getKeyLevels(candles, curPrice);
     const atSupport = isAtSupport(curPrice, keyLevels);
     const atResistance = isAtResistance(curPrice, keyLevels);
-    const atLevel = atSupport.atLevel || atResistance.atLevel;
+    const levelStrength = atSupport.atLevel ? atSupport.strength : (atResistance.atLevel ? atResistance.strength : null);
     
     const bos = detectBOS(candles);
     const fvg = detectFVG(candles);
@@ -798,31 +660,35 @@ function analyzeSignal(prices, candles, assetConfig) {
     let targetLevel = null;
     let retraced = false;
     let sweep = false;
-    let mss = { detected: false, strength: 0 };
-    let candlePattern = { detected: false, pattern: null, strength: 0 };
+    let mss = { detected: false };
+    let candlePattern = { detected: false };
     
     if (atSupport.atLevel) {
         bias = 'BUY';
         targetLevel = fvg ? (fvg.type === 'BULLISH' ? fvg.level2 : fvg.level) : (ob ? ob.level : null);
-        retraced = targetLevel ? checkRetracement(candles, targetLevel, 'BUY') : false;
-        sweep = targetLevel ? detectLiquiditySweep(candles, targetLevel) : false;
+        if (targetLevel) {
+            retraced = checkRetracement(candles, targetLevel, 'BUY');
+            sweep = detectLiquiditySweep(candles, targetLevel);
+        }
         mss = detectMSS(candles, 'BUY');
         candlePattern = detectCandlePattern(candles, 'BUY');
     } else if (atResistance.atLevel) {
         bias = 'SELL';
         targetLevel = fvg ? (fvg.type === 'BEARISH' ? fvg.level : fvg.level2) : (ob ? ob.level : null);
-        retraced = targetLevel ? checkRetracement(candles, targetLevel, 'SELL') : false;
-        sweep = targetLevel ? detectLiquiditySweep(candles, targetLevel) : false;
+        if (targetLevel) {
+            retraced = checkRetracement(candles, targetLevel, 'SELL');
+            sweep = detectLiquiditySweep(candles, targetLevel);
+        }
         mss = detectMSS(candles, 'SELL');
         candlePattern = detectCandlePattern(candles, 'SELL');
     }
     
-    // Calculate score
     const scoreResult = calculateSignalScore({
         bos: !!(bos && ((bias === 'BUY' && bos.type === 'BULLISH') || (bias === 'SELL' && bos.type === 'BEARISH'))),
-        atLevel: atLevel,
+        atLevel: !!(atSupport.atLevel || atResistance.atLevel),
         retraced: retraced,
         sweep: sweep,
+        levelStrength: levelStrength,
         mss: mss,
         candlePattern: candlePattern,
         fvg: !!fvg,
@@ -830,24 +696,22 @@ function analyzeSignal(prices, candles, assetConfig) {
         sessionBoost: sessionBoost
     });
     
-    // Build reasons
     let reasons = [];
     if (scoreResult.passed) {
-        reasons.push(`${bias === 'BUY' ? '🟢' : '🔴'} ${bias} Signal | Grade: ${scoreResult.grade} (${scoreResult.score}/100 pts)`);
-        if (atSupport.atLevel) reasons.push(`📍 Support at ${atSupport.level.toFixed(assetConfig.digits)} (${atSupport.type})`);
-        if (atResistance.atLevel) reasons.push(`📍 Resistance at ${atResistance.level.toFixed(assetConfig.digits)} (${atResistance.type})`);
-        if (bos) reasons.push(`📈 BOS confirmed (broke ${bos.level.toFixed(assetConfig.digits)})`);
-        if (retraced) reasons.push(`✅ Retracement confirmed (2 candles)`);
-        if (sweep) reasons.push(`💧 Liquidity sweep confirmed`);
-        if (mss.detected) reasons.push(`🔄 MSS confirmed (strength: ${mss.strength})`);
-        if (candlePattern.detected) reasons.push(`🕯️ ${candlePattern.pattern} detected`);
+        reasons.push(`${bias === 'BUY' ? '🟢' : '🔴'} ${bias} | ${scoreResult.grade} (${scoreResult.score}/100) | ${scoreResult.expectedWinRate}% WR expected`);
+        if (atSupport.atLevel) reasons.push(`📍 ${atSupport.strength} SUPPORT at ${atSupport.level.toFixed(assetConfig.digits)}`);
+        if (atResistance.atLevel) reasons.push(`📍 ${atResistance.strength} RESISTANCE at ${atResistance.level.toFixed(assetConfig.digits)}`);
+        if (bos) reasons.push(`📈 BOS at ${bos.level.toFixed(assetConfig.digits)}`);
+        if (retraced) reasons.push(`✅ Retracement confirmed`);
+        if (sweep) reasons.push(`💧 Liquidity sweep`);
+        if (mss.detected) reasons.push(`🔄 MSS (${mss.strength})`);
+        if (candlePattern.detected) reasons.push(`🕯️ ${candlePattern.pattern}`);
         if (fvg) reasons.push(`📊 FVG: ${fvg.level.toFixed(assetConfig.digits)} → ${fvg.level2.toFixed(assetConfig.digits)}`);
         if (ob) reasons.push(`🔷 OB at ${ob.level.toFixed(assetConfig.digits)}`);
-        if (sessionBoost) reasons.push(`🔥 London/NY session boost (+5 pts)`);
-        reasons.push(`📊 Score breakdown: ${scoreResult.breakdown.join(' + ')} = ${scoreResult.score}`);
+        reasons.push(`📊 ${scoreResult.breakdown.join(' + ')} = ${scoreResult.score}`);
         
-        if (scoreResult.recommendedLotPercent < 100) {
-            reasons.push(`⚠️ B-grade signal: Use ${scoreResult.recommendedLotPercent}% of calculated lot size`);
+        if (scoreResult.positionMultiplier < 1.0) {
+            reasons.push(`⚠️ Position size: ${Math.round(scoreResult.positionMultiplier * 100)}% of calculated`);
         }
         
         let confidence = Math.min(85, 50 + Math.floor(scoreResult.score / 2.5));
@@ -856,53 +720,35 @@ function analyzeSignal(prices, candles, assetConfig) {
             bias: bias,
             confidence: confidence,
             grade: scoreResult.grade,
-            score: scoreResult.score,
-            lotPercent: scoreResult.recommendedLotPercent,
+            expectedWinRate: scoreResult.expectedWinRate,
+            positionMultiplier: scoreResult.positionMultiplier,
             reasons: reasons,
-            currentPrice: curPrice,
-            targetLevel: targetLevel
+            currentPrice: curPrice
         };
     }
     
     return {
         bias: 'WAIT',
         confidence: 40,
-        grade: scoreResult.grade,
-        score: scoreResult.score,
-        reasons: [`❌ Signal rejected: ${scoreResult.score}/100 pts (need 60+ for B grade)`],
+        grade: 'REJECT',
+        reasons: [`❌ ${scoreResult.breakdown.join(', ')}`],
         currentPrice: curPrice
     };
 }
 
 async function sendTelegramAlert(symbolDisplay, signal, tradeLevels, assetConfig) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
-    
-    if (isCooldownActive(symbolDisplay, signal.bias)) {
-        console.log(`⏸️ Cooldown active for ${symbolDisplay} ${signal.bias}`);
-        return false;
-    }
-    
-    if (isDuplicateSignal(symbolDisplay, signal.bias, signal.currentPrice)) {
-        return false;
-    }
+    if (isCooldownActive(symbolDisplay, signal.bias)) return false;
+    if (isDuplicateSignal(symbolDisplay, signal.bias, signal.currentPrice)) return false;
     
     const session = getCurrentSession();
     const timestamp = new Date().toLocaleString();
     
-    // Adjust lot size based on grade
-    let finalLotSize = parseFloat(tradeLevels.lotSize);
-    let lotAdjustmentNote = "";
-    if (signal.grade === 'B' && signal.lotPercent === 75) {
-        finalLotSize = finalLotSize * 0.75;
-        lotAdjustmentNote = " (75% of calculated - B-grade signal)";
-    }
-    finalLotSize = Math.floor(finalLotSize * 1000) / 1000;
-    
     const message = `
 🤖 OMNI-SIGNAL ALERT 🤖
 ━━━━━━━━━━━━━━━━━━━
-${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.grade} Grade (${signal.score}/100) | ${signal.confidence}% confidence
-⏰ ${timestamp} (${session} session)
+${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.grade} (${signal.expectedWinRate}% WR expected)
+⏰ ${timestamp} (${session})
 
 📊 ${symbolDisplay}
 💰 Price: ${signal.currentPrice.toFixed(assetConfig.digits)}
@@ -913,24 +759,23 @@ ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.grade} Grade (${s
 ━━━━━━━━━━━━━━━━━━━
 🎯 TRADE SETUP
 📥 Entry: ${tradeLevels.entry}
-🛑 Stop Loss: ${tradeLevels.sl}
-🎯 Take Profit: ${tradeLevels.tp}
-📐 Risk/Reward: 1:${tradeLevels.rrRatio}
-💰 Lot Size: ${finalLotSize.toFixed(2)}${lotAdjustmentNote}
+🛑 Stop: ${tradeLevels.sl}
+🎯 TP: ${tradeLevels.tp}
+📐 RR: 1:${tradeLevels.rrRatio}
+💰 Lot: ${tradeLevels.lotSize}
 
-━━━━━━━━━━━━━━━━━━━
-⚠️ Mode: SCALP | Risk: ${DEFAULT_RISK_PERCENT}% | Balance: $${DEFAULT_BALANCE}
+⚠️ Mode: SCALP | Risk: 1% | Balance: $${DEFAULT_BALANCE}
     `;
     
     try {
         const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: message, parse_mode: 'HTML' })
+            body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: message })
         });
         const json = await res.json();
         if (json.ok) {
-            console.log(`✅ Alert sent for ${symbolDisplay} (${signal.grade} - ${signal.score}pts)`);
+            console.log(`✅ ${symbolDisplay} ${signal.grade} (${signal.expectedWinRate}% WR)`);
             setCooldown(symbolDisplay, signal.bias);
             return true;
         }
@@ -938,6 +783,7 @@ ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.grade} Grade (${s
     return false;
 }
 
+// ========== CANDLE MANAGEMENT ==========
 function loadCandleHistory(file) {
     const f = path.join(dataDir, `${file}.json`);
     if (fs.existsSync(f)) {
@@ -960,7 +806,6 @@ function saveCandleToHistory(file, candle) {
     data.timestamp = Date.now();
     data.high = Math.max(...data.candles.slice(-288).map(c => c.high));
     data.low = Math.min(...data.candles.slice(-288).map(c => c.low));
-    data.change = ((data.currentPrice - data.candles[data.candles.length-2]?.close) / data.candles[data.candles.length-2]?.close * 100) || 0;
     fs.writeFileSync(f, JSON.stringify(data, null, 2));
 }
 
@@ -997,21 +842,17 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
                 };
                 saveCandleToHistory(file, completed);
                 candles.push(completed);
-                const prices = candles.map(c => c.close);
-                if (candles.length >= 30) {
+                
+                if (candles.length >= 40) {
+                    const prices = candles.map(c => c.close);
                     const signal = analyzeSignal(prices, candles, assetConfig);
-                    console.log(`📊 ${displayName} - ${signal.bias} | ${signal.grade} (${signal.score}pts) | ${signal.confidence}%`);
+                    console.log(`📊 ${displayName} - ${signal.bias} | ${signal.grade} | ${signal.expectedWinRate || 0}% WR`);
                     
-                    // ONLY send B grade or higher (60+ points)
-                    if (signal.bias !== 'WAIT' && signal.grade === 'B' || signal.grade === 'A' || signal.grade === 'A+') {
-                        const tradeLevels = calculateTradeLevels(signal.currentPrice, signal.bias, assetConfig, candles);
+                    if (signal.bias !== 'WAIT' && signal.grade !== 'REJECT') {
+                        const tradeLevels = calculateTradeLevels(signal.currentPrice, signal.bias, assetConfig, candles, signal.positionMultiplier || 1.0);
                         if (tradeLevels && parseFloat(tradeLevels.rrRatio) >= 2.0) {
                             await sendTelegramAlert(displayName, signal, tradeLevels, assetConfig);
-                        } else {
-                            console.log(`⏸️ ${displayName} skipped - RR ${tradeLevels?.rrRatio} below 2:1`);
                         }
-                    } else if (signal.bias !== 'WAIT') {
-                        console.log(`⏸️ ${displayName} skipped - Grade ${signal.grade} (below B threshold)`);
                     }
                 }
             }
@@ -1027,26 +868,18 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
             state.candle.low = Math.min(state.candle.low, price);
             state.candle.close = price;
             state.lastPrice = price;
-            state.lastTimestamp = now;
         }
         saveCandleState(file, state);
-        console.log(`✓ ${displayName} price ${price}`);
+        console.log(`✓ ${displayName}: ${price}`);
     } catch (err) {
         console.error(`✗ ${displayName}: ${err.message}`);
     }
 }
 
 async function main() {
-    console.log('--- OMNI-SIGNAL SCALPING OPTIMIZED (SCORING SYSTEM) ---');
+    console.log('--- OMNI-SIGNAL v4 (65-75% Win Rate Target | 1:2 RR) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
-    console.log(`Alpha Vantage: ${!!ALPHA_VANTAGE_KEY ? '✅' : '❌'}`);
-    console.log(`Mode: SCALP | Balance: $${DEFAULT_BALANCE} | Risk: ${DEFAULT_RISK_PERCENT}%`);
-    console.log(`🔧 SCORING SYSTEM RULES:`);
-    console.log(`   - A+ (80-100pts): Full lot size | A (70-79pts): Full lot size`);
-    console.log(`   - B (60-69pts): 75% lot size | C (50-59pts): ❌ NO SEND`);
-    console.log(`   - Minimum threshold: 60 points (B grade)`);
-    console.log(`   - Minimum RR: 1:2`);
-    console.log(`   - Duplicate prevention: 1 hour | Cooldown: 15 min`);
+    console.log(`Rules: Retrace + Sweep REQUIRED | Minor = 70% size | Major = 100% size`);
 
     let eurusd, gbpusd, usdjpy, usdcad, usdchf, usdsek;
     try {
@@ -1058,51 +891,33 @@ async function main() {
         usdsek = await fetchForexPrice('USD', 'SEK');
     } catch(e) { console.error('Forex error:', e.message); }
 
-    let dxyPrice = null;
     if (eurusd && gbpusd && usdjpy && usdcad && usdchf && usdsek) {
-        dxyPrice = calculateDXY(eurusd, usdjpy, gbpusd, usdcad, usdsek, usdchf);
+        const dxyPrice = calculateDXY(eurusd, usdjpy, gbpusd, usdcad, usdsek, usdchf);
         console.log(`✓ DXY: ${dxyPrice.toFixed(4)}`);
+        const dxyData = { currentPrice: dxyPrice, timestamp: Date.now(), candles: [] };
+        fs.writeFileSync(path.join(dataDir, 'dxy.json'), JSON.stringify(dxyData, null, 2));
     }
 
-    const forex = [
+    const assets = [
         { file: 'eurusd', fetcher: () => fetchForexPrice('EUR', 'USD'), display: 'EUR/USD', config: ASSET_CONFIGS.eurusd },
         { file: 'gbpusd', fetcher: () => fetchForexPrice('GBP', 'USD'), display: 'GBP/USD', config: ASSET_CONFIGS.gbpusd },
         { file: 'usdjpy', fetcher: () => fetchForexPrice('USD', 'JPY'), display: 'USD/JPY', config: ASSET_CONFIGS.usdjpy },
         { file: 'usdcad', fetcher: () => fetchForexPrice('USD', 'CAD'), display: 'USD/CAD', config: ASSET_CONFIGS.usdcad },
         { file: 'usdchf', fetcher: () => fetchForexPrice('USD', 'CHF'), display: 'USD/CHF', config: ASSET_CONFIGS.usdchf },
-        { file: 'usdsek', fetcher: () => fetchForexPrice('USD', 'SEK'), display: 'USD/SEK', config: ASSET_CONFIGS.usdsek }
-    ];
-    const crypto = [
+        { file: 'usdsek', fetcher: () => fetchForexPrice('USD', 'SEK'), display: 'USD/SEK', config: ASSET_CONFIGS.usdsek },
         { file: 'btcusd', fetcher: () => fetchCryptoPrice('bitcoin'), display: 'BTC/USD', config: ASSET_CONFIGS.btcusd },
         { file: 'ethusd', fetcher: () => fetchCryptoPrice('ethereum'), display: 'ETH/USD', config: ASSET_CONFIGS.ethusd },
-        { file: 'solusd', fetcher: () => fetchCryptoPrice('solana'), display: 'SOL/USD', config: ASSET_CONFIGS.solusd }
-    ];
-    const metals = [
+        { file: 'solusd', fetcher: () => fetchCryptoPrice('solana'), display: 'SOL/USD', config: ASSET_CONFIGS.solusd },
         { file: 'xauusd', fetcher: fetchGoldPrice, display: 'XAUUSD (Gold)', config: ASSET_CONFIGS.xauusd },
-        { file: 'xagusd', fetcher: fetchSilverPrice, display: 'XAGUSD (Silver)', config: ASSET_CONFIGS.xagusd }
-    ];
-    const oil = [
+        { file: 'xagusd', fetcher: fetchSilverPrice, display: 'XAGUSD (Silver)', config: ASSET_CONFIGS.xagusd },
         { file: 'wtiusd', fetcher: fetchOilPrice, display: 'WTI Oil', config: ASSET_CONFIGS.wtiusd }
     ];
 
-    for (const a of forex) await processAsset(a.file, a.fetcher, a.display, a.config);
-    console.log('⏸️ 1.5s delay...'); await new Promise(r => setTimeout(r, 1500));
-    for (let i = 0; i < crypto.length; i++) { 
-        await processAsset(crypto[i].file, crypto[i].fetcher, crypto[i].display, crypto[i].config); 
-        if (i < crypto.length - 1) await new Promise(r => setTimeout(r, 1500)); 
+    for (let i = 0; i < assets.length; i++) {
+        await processAsset(assets[i].file, assets[i].fetcher, assets[i].display, assets[i].config);
+        if (i < assets.length - 1) await new Promise(r => setTimeout(r, 1500));
     }
-    console.log('⏸️ 1.5s delay...'); await new Promise(r => setTimeout(r, 1500));
-    for (let i = 0; i < metals.length; i++) { 
-        await processAsset(metals[i].file, metals[i].fetcher, metals[i].display, metals[i].config); 
-        if (i < metals.length - 1) await new Promise(r => setTimeout(r, 1500)); 
-    }
-    console.log('⏸️ 1.5s delay...'); await new Promise(r => setTimeout(r, 1500));
-    for (const a of oil) await processAsset(a.file, a.fetcher, a.display, a.config);
-
-    if (dxyPrice) {
-        const dxyData = { currentPrice: dxyPrice, timestamp: Date.now(), candles: [] };
-        fs.writeFileSync(path.join(dataDir, 'dxy.json'), JSON.stringify(dxyData, null, 2));
-    }
+    
     console.log('--- Completed ---');
 }
 
