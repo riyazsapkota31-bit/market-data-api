@@ -1,4 +1,4 @@
-// fetch-prices.js – FINAL v6.0 (Threshold 55, dynamic RR, single TP, no sideways penalty)
+// fetch-prices.js – FINAL v8.0 (Reasonable stops, S/R bonus, institutional footprints)
 
 const fs = require('fs');
 const path = require('path');
@@ -17,20 +17,21 @@ const DEFAULT_MODE = 'scalp';
 const lastAlertCache = {};
 let oilRunCounter = 0;
 
+// Asset configurations with minimum stop percentages
 const ASSET_CONFIGS = {
-    eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex' },
-    gbpusd: { multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex' },
-    usdjpy: { multiplier: 100, spread: 0.03, digits: 3, class: 'forex' },
-    usdcad: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex' },
-    usdchf: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex' },
-    usdsek: { multiplier: 10000, spread: 0.0003, digits: 5, class: 'forex' },
-    btcusd: { multiplier: 10, spread: 75.00, digits: 0, class: 'crypto' },
-    ethusd: { multiplier: 10, spread: 6.00, digits: 0, class: 'crypto' },
-    solusd: { multiplier: 10, spread: 0.50, digits: 2, class: 'crypto' },
-    xauusd: { multiplier: 100, spread: 0.040, digits: 2, class: 'commodities' },
-    xagusd: { multiplier: 100, spread: 0.030, digits: 3, class: 'commodities' },
-    wtiusd: { multiplier: 100, spread: 0.030, digits: 2, class: 'commodities' },
-    dxy: { multiplier: 100, spread: 0.05, digits: 4, class: 'forex' }
+    eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex', minStopPercent: 0.0005 },
+    gbpusd: { multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex', minStopPercent: 0.0005 },
+    usdjpy: { multiplier: 100, spread: 0.03, digits: 3, class: 'forex', minStopPercent: 0.0005 },
+    usdcad: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPercent: 0.0005 },
+    usdchf: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPercent: 0.0005 },
+    usdsek: { multiplier: 10000, spread: 0.0003, digits: 5, class: 'forex', minStopPercent: 0.0005 },
+    btcusd: { multiplier: 10, spread: 75.00, digits: 0, class: 'crypto', minStopPercent: 0.005 },
+    ethusd: { multiplier: 10, spread: 6.00, digits: 0, class: 'crypto', minStopPercent: 0.005 },
+    solusd: { multiplier: 10, spread: 0.50, digits: 2, class: 'crypto', minStopPercent: 0.005 },
+    xauusd: { multiplier: 100, spread: 0.040, digits: 2, class: 'commodities', minStopPercent: 0.002 },
+    xagusd: { multiplier: 100, spread: 0.030, digits: 3, class: 'commodities', minStopPercent: 0.002 },
+    wtiusd: { multiplier: 100, spread: 0.030, digits: 2, class: 'commodities', minStopPercent: 0.002 },
+    dxy: { multiplier: 100, spread: 0.05, digits: 4, class: 'forex', minStopPercent: 0.0005 }
 };
 
 async function fetchJSON(url, timeout = 10000, headers = {}) {
@@ -142,6 +143,89 @@ function getCurrentSession() {
     return 'OFF_HOURS';
 }
 
+function getSessionQuality() {
+    const now = new Date();
+    const utcHour = now.getUTCHours();
+    const utcMinute = now.getUTCMinutes();
+    
+    // London session: 7:00-16:00 UTC
+    if (utcHour === 7 && utcMinute < 30) return 1.5;  // First 30 min of London
+    if (utcHour >= 7 && utcHour < 16) return 1.0;     // Rest of London
+    
+    // New York session: 12:00-20:00 UTC
+    if (utcHour === 12 && utcMinute < 30) return 1.5; // First 30 min of NY
+    if (utcHour >= 12 && utcHour < 20) return 1.0;    // Rest of NY
+    
+    // Asian session: 23:00-7:00 UTC
+    if (utcHour >= 23 || utcHour < 7) return 0.5;
+    
+    return 0.3; // Off hours
+}
+
+// ========== KEY LEVELS DETECTION ==========
+function getKeyLevels(candles, currentPrice) {
+    const levels = [];
+    
+    // Previous day high/low (approximate from last 288 candles for 1-min, or 24 hours of 5-min)
+    const dayCandles = candles.slice(-288);
+    if (dayCandles.length > 0) {
+        const prevDayHigh = Math.max(...dayCandles.map(c => c.high));
+        const prevDayLow = Math.min(...dayCandles.map(c => c.low));
+        levels.push({ price: prevDayHigh, type: 'MAJOR_RESISTANCE', strength: 15 });
+        levels.push({ price: prevDayLow, type: 'MAJOR_SUPPORT', strength: 15 });
+    }
+    
+    // Weekly open (approximate from last 1440 candles)
+    const weekCandles = candles.slice(-1440);
+    if (weekCandles.length > 0) {
+        const weeklyOpen = weekCandles[0].open;
+        levels.push({ price: weeklyOpen, type: 'WEEKLY_OPEN', strength: 15 });
+    }
+    
+    // Recent swing highs/lows (minor S/R)
+    for (let i = 10; i < candles.length - 10; i++) {
+        const isSwingHigh = candles[i].high > candles[i-5].high && candles[i].high > candles[i+5].high;
+        const isSwingLow = candles[i].low < candles[i-5].low && candles[i].low < candles[i+5].low;
+        
+        if (isSwingHigh) {
+            levels.push({ price: candles[i].high, type: 'MINOR_RESISTANCE', strength: 10 });
+        }
+        if (isSwingLow) {
+            levels.push({ price: candles[i].low, type: 'MINOR_SUPPORT', strength: 10 });
+        }
+    }
+    
+    // Round numbers
+    const roundNumber = Math.round(currentPrice / (currentPrice > 100 ? 100 : 10)) * (currentPrice > 100 ? 100 : 10);
+    levels.push({ price: roundNumber, type: 'ROUND_NUMBER', strength: 5 });
+    
+    // Remove duplicates and sort
+    const unique = [];
+    for (const level of levels) {
+        let duplicate = false;
+        for (const existing of unique) {
+            if (Math.abs(existing.price - level.price) / level.price < 0.001) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) unique.push(level);
+    }
+    
+    return unique;
+}
+
+function getLevelBonus(price, levels, maxBonus = 20) {
+    let bonus = 0;
+    for (const level of levels) {
+        const distance = Math.abs(price - level.price) / price;
+        if (distance < 0.001) { // Within 0.1%
+            bonus += level.strength;
+        }
+    }
+    return Math.min(bonus, maxBonus);
+}
+
 // ========== INSTITUTIONAL FOOTPRINT DETECTION ==========
 
 function detectFVG(candles) {
@@ -151,10 +235,10 @@ function detectFVG(candles) {
     const c3 = candles[candles.length - 1];
     
     if (c1.high < c3.low) {
-        return { type: 'BULLISH', strength: 25, reason: 'FVG (bullish gap)', level: c1.high, level2: c3.low };
+        return { type: 'BULLISH', strength: 25, reason: 'FVG (bullish gap)' };
     }
     if (c3.high < c1.low) {
-        return { type: 'BEARISH', strength: 25, reason: 'FVG (bearish gap)', level: c3.high, level2: c1.low };
+        return { type: 'BEARISH', strength: 25, reason: 'FVG (bearish gap)' };
     }
     return null;
 }
@@ -165,10 +249,10 @@ function detectOrderBlock(candles) {
     const last = candles[candles.length - 1];
     
     if (prev.close < prev.open && last.close > last.open && last.close > prev.high) {
-        return { type: 'BULLISH', strength: 30, reason: 'Order Block (bullish)', level: prev.low, breakout: prev.high };
+        return { type: 'BULLISH', strength: 30, reason: 'Order Block (bullish)' };
     }
     if (prev.close > prev.open && last.close < last.open && last.close < prev.low) {
-        return { type: 'BEARISH', strength: 30, reason: 'Order Block (bearish)', level: prev.high, breakout: prev.low };
+        return { type: 'BEARISH', strength: 30, reason: 'Order Block (bearish)' };
     }
     return null;
 }
@@ -184,10 +268,10 @@ function detectBOS(candles) {
     const previousLow = Math.min(...lows.slice(-20, -10));
     
     if (recentHigh > previousHigh) {
-        return { type: 'BULLISH', strength: 20, reason: 'BOS (higher high)', level: previousHigh, newLevel: recentHigh };
+        return { type: 'BULLISH', strength: 20, reason: 'BOS (higher high)' };
     }
     if (recentLow < previousLow) {
-        return { type: 'BEARISH', strength: 20, reason: 'BOS (lower low)', level: previousLow, newLevel: recentLow };
+        return { type: 'BEARISH', strength: 20, reason: 'BOS (lower low)' };
     }
     return null;
 }
@@ -202,26 +286,34 @@ function detectLiquiditySweep(candles) {
     const lowestLow = Math.min(...recentLows);
     
     if (last.low < lowestLow && last.close > lowestLow && last.close > last.open) {
-        return { type: 'BULLISH', strength: 35, reason: 'Liquidity sweep (bullish reversal)', level: lowestLow, sweep: last.low };
+        return { type: 'BULLISH', strength: 35, reason: 'Liquidity sweep (bullish reversal)' };
     }
     if (last.high > highestHigh && last.close < highestHigh && last.close < last.open) {
-        return { type: 'BEARISH', strength: 35, reason: 'Liquidity sweep (bearish reversal)', level: highestHigh, sweep: last.high };
+        return { type: 'BEARISH', strength: 35, reason: 'Liquidity sweep (bearish reversal)' };
     }
     return null;
 }
 
 // ========== DYNAMIC RR (based on confidence) ==========
 function getDynamicRR(confidence) {
-    if (confidence >= 80) return 3.0;      // 1:3
-    if (confidence >= 70) return 2.5;      // 1:2.5
-    if (confidence >= 60) return 2.0;      // 1:2
-    return 1.5;                             // 1:1.5 (minimum)
+    if (confidence >= 80) return 3.0;
+    if (confidence >= 70) return 2.5;
+    if (confidence >= 60) return 2.0;
+    return 1.5;
 }
 
-// ========== SINGLE TP CALCULATION ==========
+// ========== REASONABLE STOP LOSS (with minimum distance) ==========
 function calculateTradeLevels(price, atr, bias, confidence, config) {
-    const atrMult = DEFAULT_MODE === 'scalp' ? 0.45 : 0.8;
-    const slDist = atr * atrMult;
+    const atrMult = DEFAULT_MODE === 'scalp' ? 0.8 : 1.2;  // Wider stops for scalping
+    let slDist = atr * atrMult;
+    
+    // Apply minimum stop based on asset class
+    const minStopPrice = price * config.minStopPercent;
+    if (slDist < minStopPrice) {
+        slDist = minStopPrice;
+        console.log(`⚠️ ATR stop was too small (${(atr * atrMult).toFixed(2)}), using minimum stop: ${minStopPrice.toFixed(2)}`);
+    }
+    
     const rr = getDynamicRR(confidence);
     
     let entry = price;
@@ -250,67 +342,76 @@ function calculateTradeLevels(price, atr, bias, confidence, config) {
     };
 }
 
-// ========== MAIN STRATEGY (Threshold 55, no sideways penalty) ==========
-function analyzeSignal(prices, candles, assetClass) {
+// ========== MAIN STRATEGY ==========
+function analyzeSignal(prices, candles, assetClass, assetConfig) {
     if (candles.length < 50) {
         return { 
             bias: 'WAIT', 
             confidence: 30, 
             reasons: [`Building data (${candles.length}/50)`],
             atr: calcATR(prices, 14),
-            currentPrice: prices[prices.length-1],
-            footprints: []
+            currentPrice: prices[prices.length-1]
         };
     }
     
     const curPrice = prices[prices.length-1];
     const atr = calcATR(prices, 14);
     
+    // Detect footprints
     const fvg = detectFVG(candles);
     const ob = detectOrderBlock(candles);
     const bos = detectBOS(candles);
     const sweep = detectLiquiditySweep(candles);
     
+    // Get key levels for bonus
+    const keyLevels = getKeyLevels(candles, curPrice);
+    const levelBonus = getLevelBonus(curPrice, keyLevels, 20);
+    
     let buyScore = 0;
     let sellScore = 0;
     let reasons = [];
-    let footprints = [];
     
     if (fvg) {
         if (fvg.type === 'BULLISH') buyScore += fvg.strength;
         else sellScore += fvg.strength;
         reasons.push(fvg.reason);
-        footprints.push({ type: 'FVG', data: fvg });
     }
     if (ob) {
         if (ob.type === 'BULLISH') buyScore += ob.strength;
         else sellScore += ob.strength;
         reasons.push(ob.reason);
-        footprints.push({ type: 'OB', data: ob });
     }
     if (bos) {
         if (bos.type === 'BULLISH') buyScore += bos.strength;
         else sellScore += bos.strength;
         reasons.push(bos.reason);
-        footprints.push({ type: 'BOS', data: bos });
     }
     if (sweep) {
         if (sweep.type === 'BULLISH') buyScore += sweep.strength;
         else sellScore += sweep.strength;
         reasons.push(sweep.reason);
-        footprints.push({ type: 'SWEEP', data: sweep });
     }
     
-    const session = getCurrentSession();
-    if (session === 'LONDON' || session === 'NEW_YORK') {
-        buyScore += 10;
-        sellScore += 10;
-        reasons.push(`${session} session (high volatility)`);
+    // Apply level bonus (boosts confidence, not required)
+    if (levelBonus > 0 && buyScore > sellScore) {
+        buyScore += levelBonus;
+        reasons.push(`+${levelBonus} from key level`);
+    } else if (levelBonus > 0 && sellScore > buyScore) {
+        sellScore += levelBonus;
+        reasons.push(`+${levelBonus} from key level`);
+    }
+    
+    // Session quality multiplier
+    const sessionQuality = getSessionQuality();
+    if (sessionQuality > 0) {
+        buyScore = Math.floor(buyScore * sessionQuality);
+        sellScore = Math.floor(sellScore * sessionQuality);
+        if (sessionQuality >= 1.0) reasons.push('High volatility session');
     }
     
     let bias = 'WAIT';
     let confidence = 40;
-    const minScore = 55;  // Threshold 55
+    const minScore = 55;
     
     if (buyScore > minScore && buyScore > sellScore) {
         bias = 'BUY';
@@ -323,8 +424,7 @@ function analyzeSignal(prices, candles, assetClass) {
     return {
         bias,
         confidence,
-        reasons: reasons.slice(0, 4),
-        footprints,
+        reasons: reasons.slice(0, 5),
         atr,
         currentPrice: curPrice
     };
@@ -446,7 +546,7 @@ async function processAsset(file, priceFetcher, displayName, assetConfig, isOil 
                 candles.push(completed);
                 const prices = candles.map(c => c.close);
                 if (candles.length >= 50) {
-                    const signal = analyzeSignal(prices, candles, assetConfig.class);
+                    const signal = analyzeSignal(prices, candles, assetConfig.class, assetConfig);
                     console.log(`📊 ${displayName} - ${signal.bias} (${signal.confidence}%) - ${signal.reasons.slice(0, 2).join(', ') || 'No setup'}`);
                     if (signal.bias !== 'WAIT' && signal.confidence >= 55) {
                         await sendTelegramAlert(displayName, signal, assetConfig);
@@ -476,7 +576,7 @@ async function processAsset(file, priceFetcher, displayName, assetConfig, isOil 
 
 // ========== MAIN ==========
 async function main() {
-    console.log('--- OMNI-SIGNAL FINAL v6.0 (Threshold 55, dynamic RR, single TP) ---');
+    console.log('--- OMNI-SIGNAL FINAL v8.0 (Reasonable stops, S/R bonus) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
     console.log(`Alpha Vantage: ${!!ALPHA_VANTAGE_KEY ? '✅' : '❌'}`);
     console.log(`Mode: ${DEFAULT_MODE} | Balance: $${DEFAULT_BALANCE} | Risk: ${DEFAULT_RISK_PERCENT}%`);
