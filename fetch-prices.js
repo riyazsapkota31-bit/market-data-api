@@ -1,4 +1,4 @@
-// fetch-prices.js – INSTITUTIONAL SCALPING v11.0 (Clean, reliable, no false signals) 
+// fetch-prices.js – INSTITUTIONAL SCALPING FINAL (LOGICAL TP/SL + FIXED RETRACEMENT)
 
 const fs = require('fs');
 const path = require('path');
@@ -17,7 +17,6 @@ const DEFAULT_MODE = 'scalp';
 const COOLDOWN_FILE = path.join(dataDir, 'cooldown.json');
 let oilRunCounter = 0;
 
-// Asset configurations
 const ASSET_CONFIGS = {
     eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex', stopPercent: 0.0008, maxLot: 5.0 },
     gbpusd: { multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex', stopPercent: 0.0008, maxLot: 5.0 },
@@ -34,7 +33,6 @@ const ASSET_CONFIGS = {
     dxy: { multiplier: 100, spread: 0.05, digits: 4, class: 'forex', stopPercent: 0.0008, maxLot: 5.0 }
 };
 
-// ========== FILE-BASED COOLDOWN ==========
 function loadCooldown() {
     if (fs.existsSync(COOLDOWN_FILE)) {
         try { return JSON.parse(fs.readFileSync(COOLDOWN_FILE)); } catch(e) {}
@@ -51,7 +49,7 @@ function isCooldownActive(symbol, bias) {
     const key = `${symbol}_${bias}`;
     const lastAlert = cooldown[key];
     if (!lastAlert) return false;
-    return (Date.now() - lastAlert) < 1800000; // 30 minutes
+    return (Date.now() - lastAlert) < 1800000;
 }
 
 function setCooldown(symbol, bias) {
@@ -60,7 +58,6 @@ function setCooldown(symbol, bias) {
     saveCooldown(cooldown);
 }
 
-// ========== FETCHERS ==========
 async function fetchJSON(url, timeout = 10000, headers = {}) {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
@@ -139,7 +136,6 @@ function calculateDXY(eurusd, usdjpy, gbpusd, usdcad, usdsek, usdchf) {
         Math.pow(usdchf, 0.036);
 }
 
-// ========== SESSION ==========
 function getSessionMultiplier() {
     const now = new Date();
     const utcHour = now.getUTCHours();
@@ -159,18 +155,15 @@ function getCurrentSession() {
     return 'OFF_HOURS';
 }
 
-// ========== KEY LEVELS (Support/Resistance) ==========
 function getKeyLevels(candles, currentPrice) {
     const levels = [];
     
-    // Major levels: Daily high/low
     const dayCandles = candles.slice(-288);
     if (dayCandles.length > 0) {
         levels.push({ price: Math.max(...dayCandles.map(c => c.high)), type: 'MAJOR_RESISTANCE', strength: 'MAJOR' });
         levels.push({ price: Math.min(...dayCandles.map(c => c.low)), type: 'MAJOR_SUPPORT', strength: 'MAJOR' });
     }
     
-    // Minor levels: Recent swing highs/lows
     for (let i = 10; i < candles.length - 10; i++) {
         if (candles[i].high > candles[i-5].high && candles[i].high > candles[i+5].high) {
             levels.push({ price: candles[i].high, type: 'MINOR_RESISTANCE', strength: 'MINOR' });
@@ -180,11 +173,9 @@ function getKeyLevels(candles, currentPrice) {
         }
     }
     
-    // Round numbers
     const roundNumber = Math.round(currentPrice / (currentPrice > 100 ? 100 : 10)) * (currentPrice > 100 ? 100 : 10);
     levels.push({ price: roundNumber, type: 'ROUND_NUMBER', strength: 'MINOR' });
     
-    // Remove duplicates
     const unique = [];
     for (const level of levels) {
         let duplicate = false;
@@ -217,7 +208,6 @@ function isAtResistance(price, levels) {
     return { atLevel: false };
 }
 
-// ========== INSTITUTIONAL FOOTPRINTS ==========
 function detectBOS(candles) {
     if (candles.length < 30) return null;
     const highs = candles.map(c => c.high);
@@ -260,59 +250,233 @@ function detectOrderBlock(candles) {
 function detectLiquiditySweep(candles, level) {
     if (candles.length < 5) return false;
     const last = candles[candles.length - 1];
-    const prev = candles[candles.length - 2];
-    
-    // Bullish sweep: price went below level, then closed above it
     if (last.low < level && last.close > level && last.close > last.open) return true;
-    // Bearish sweep: price went above level, then closed below it
     if (last.high > level && last.close < level && last.close < last.open) return true;
     return false;
 }
 
-function checkRetracement(candles, level) {
-    if (candles.length < 5) return false;
-    const recentCandles = candles.slice(-10);
-    for (const candle of recentCandles) {
-        if (candle.low <= level || candle.high >= level) return true;
-    }
-    return false;
-}
-
-// ========== TRADE LEVELS ==========
-function calculateTradeLevels(price, bias, config) {
-    const stopDistance = price * config.stopPercent;
-    const rr = 2.5; // Fixed 2.5:1 risk/reward for scalping
+// ========== FIXED RETRACEMENT FUNCTION ==========
+function checkRetracement(candles, level, bias) {
+    if (candles.length < 6) return false;
     
-    let entry = price;
-    let sl, tp;
+    let touchCandleIndex = -1;
+    for (let i = candles.length - 1; i >= 0; i--) {
+        if (bias === 'BUY' && candles[i].low <= level) {
+            touchCandleIndex = i;
+            break;
+        }
+        if (bias === 'SELL' && candles[i].high >= level) {
+            touchCandleIndex = i;
+            break;
+        }
+    }
+    
+    if (touchCandleIndex === -1 || touchCandleIndex === candles.length - 1) return false;
+    
+    const candlesAfter = candles.slice(touchCandleIndex + 1);
+    if (candlesAfter.length < 2) return false;
     
     if (bias === 'BUY') {
-        sl = entry - stopDistance;
-        tp = entry + (stopDistance * rr);
+        const firstCandleBullish = candlesAfter[0].close > candlesAfter[0].open;
+        const secondCandleHigher = candlesAfter[1].close > candlesAfter[0].close;
+        const priceMovedUp = (candlesAfter[1].close - level) / level > 0.0005;
+        return firstCandleBullish && secondCandleHigher && priceMovedUp;
     } else {
-        sl = entry + stopDistance;
-        tp = entry - (stopDistance * rr);
+        const firstCandleBearish = candlesAfter[0].close < candlesAfter[0].open;
+        const secondCandleLower = candlesAfter[1].close < candlesAfter[0].close;
+        const priceMovedDown = (level - candlesAfter[1].close) / level > 0.0005;
+        return firstCandleBearish && secondCandleLower && priceMovedDown;
+    }
+}
+
+// ========== LOGICAL STOP LOSS (based on market structure) ==========
+function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
+    if (!candles || candles.length < 20) {
+        // Fallback to percentage-based
+        const stopDistance = currentPrice * assetConfig.stopPercent;
+        return bias === 'BUY' ? currentPrice - stopDistance : currentPrice + stopDistance;
     }
     
+    const recentCandles = candles.slice(-30);
+    const swingPoints = [];
+    
+    // Find swing lows and highs
+    for (let i = 2; i < recentCandles.length - 2; i++) {
+        // Swing low
+        if (recentCandles[i].low < recentCandles[i-1].low && 
+            recentCandles[i].low < recentCandles[i-2].low &&
+            recentCandles[i].low < recentCandles[i+1].low &&
+            recentCandles[i].low < recentCandles[i+2].low) {
+            swingPoints.push({ price: recentCandles[i].low, type: 'LOW' });
+        }
+        // Swing high
+        if (recentCandles[i].high > recentCandles[i-1].high && 
+            recentCandles[i].high > recentCandles[i-2].high &&
+            recentCandles[i].high > recentCandles[i+1].high &&
+            recentCandles[i].high > recentCandles[i+2].high) {
+            swingPoints.push({ price: recentCandles[i].high, type: 'HIGH' });
+        }
+    }
+    
+    const buffer = currentPrice * 0.0005; // 0.05% buffer
+    
+    if (bias === 'BUY') {
+        // Find nearest swing low BELOW current price
+        const validLows = swingPoints.filter(p => p.type === 'LOW' && p.price < currentPrice);
+        if (validLows.length > 0) {
+            const nearestLow = Math.max(...validLows.map(p => p.price));
+            return nearestLow - buffer;
+        }
+    } else {
+        // Find nearest swing high ABOVE current price
+        const validHighs = swingPoints.filter(p => p.type === 'HIGH' && p.price > currentPrice);
+        if (validHighs.length > 0) {
+            const nearestHigh = Math.min(...validHighs.map(p => p.price));
+            return nearestHigh + buffer;
+        }
+    }
+    
+    // Fallback to percentage
+    const stopDistance = currentPrice * assetConfig.stopPercent;
+    return bias === 'BUY' ? currentPrice - stopDistance : currentPrice + stopDistance;
+}
+
+// ========== LOGICAL TAKE PROFIT (ONE RELIABLE TARGET) ==========
+function findLogicalTakeProfit(candles, currentPrice, entry, stopLoss, bias, assetConfig) {
+    if (!candles || candles.length < 20) {
+        // Fallback to 2.5x risk
+        const risk = Math.abs(entry - stopLoss);
+        return bias === 'BUY' ? entry + (risk * 2.5) : entry - (risk * 2.5);
+    }
+    
+    const recentCandles = candles.slice(-50);
+    const resistanceLevels = [];
+    const supportLevels = [];
+    
+    // Find key levels
+    for (let i = 5; i < recentCandles.length - 5; i++) {
+        if (recentCandles[i].high > recentCandles[i-1].high && 
+            recentCandles[i].high > recentCandles[i+1].high &&
+            recentCandles[i].high > recentCandles[i-2].high &&
+            recentCandles[i].high > recentCandles[i+2].high) {
+            resistanceLevels.push(recentCandles[i].high);
+        }
+        if (recentCandles[i].low < recentCandles[i-1].low && 
+            recentCandles[i].low < recentCandles[i+1].low &&
+            recentCandles[i].low < recentCandles[i-2].low &&
+            recentCandles[i].low < recentCandles[i+2].low) {
+            supportLevels.push(recentCandles[i].low);
+        }
+    }
+    
+    const risk = Math.abs(entry - stopLoss);
+    const buffer = currentPrice * 0.0005; // 0.05% buffer
+    let takeProfit = null;
+    let actualRR = 0;
+    
+    if (bias === 'BUY') {
+        // Find next resistance above entry
+        const validResistances = resistanceLevels.filter(r => r > entry);
+        validResistances.sort((a, b) => a - b);
+        
+        if (validResistances.length > 0) {
+            // Place TP just below the resistance level
+            takeProfit = validResistances[0] - buffer;
+            actualRR = (takeProfit - entry) / risk;
+            
+            // Cap RR at 4:1 (don't chase unrealistic targets)
+            if (actualRR > 4.0) {
+                takeProfit = entry + (risk * 4.0);
+                actualRR = 4.0;
+            }
+            // Ensure minimum RR of 1.5:1
+            if (actualRR < 1.5) {
+                takeProfit = entry + (risk * 1.5);
+                actualRR = 1.5;
+            }
+        } else {
+            // No clear resistance, use 2.5x risk
+            takeProfit = entry + (risk * 2.5);
+            actualRR = 2.5;
+        }
+    } else {
+        // Find next support below entry
+        const validSupports = supportLevels.filter(s => s < entry);
+        validSupports.sort((a, b) => b - a); // Descending (closest first)
+        
+        if (validSupports.length > 0) {
+            // Place TP just above the support level
+            takeProfit = validSupports[0] + buffer;
+            actualRR = (entry - takeProfit) / risk;
+            
+            if (actualRR > 4.0) {
+                takeProfit = entry - (risk * 4.0);
+                actualRR = 4.0;
+            }
+            if (actualRR < 1.5) {
+                takeProfit = entry - (risk * 1.5);
+                actualRR = 1.5;
+            }
+        } else {
+            takeProfit = entry - (risk * 2.5);
+            actualRR = 2.5;
+        }
+    }
+    
+    return { takeProfit, rr: actualRR.toFixed(1) };
+}
+
+// ========== UPDATED TRADE LEVELS CALCULATION ==========
+function calculateTradeLevels(price, bias, assetConfig, candles) {
+    // Find logical stop loss first
+    const stopLoss = findLogicalStopLoss(candles, price, bias, assetConfig);
+    
+    // Calculate entry (current price for market orders)
+    const entry = price;
+    
+    // Find logical take profit based on stop loss
+    const { takeProfit, rr } = findLogicalTakeProfit(candles, price, entry, stopLoss, bias, assetConfig);
+    
+    // Verify stop distance meets minimum requirement
+    const stopDistance = Math.abs(entry - stopLoss);
+    const minStopDistance = price * assetConfig.stopPercent;
+    
+    if (stopDistance < minStopDistance * 0.8) {
+        // Stop is too tight, adjust to minimum
+        const adjustedSL = bias === 'BUY' 
+            ? entry - minStopDistance 
+            : entry + minStopDistance;
+        // Recalculate TP with adjusted SL
+        const adjustedTP = findLogicalTakeProfit(candles, price, entry, adjustedSL, bias, assetConfig);
+        return {
+            entry: entry.toFixed(assetConfig.digits),
+            sl: adjustedSL.toFixed(assetConfig.digits),
+            tp: adjustedTP.takeProfit.toFixed(assetConfig.digits),
+            rrRatio: adjustedTP.rr,
+            riskDistance: minStopDistance
+        };
+    }
+    
+    // Calculate lot size
     const riskAmount = DEFAULT_BALANCE * (DEFAULT_RISK_PERCENT / 100);
-    const stopDistPoints = Math.abs(entry - sl) + config.spread;
-    let lotSize = riskAmount / (stopDistPoints * config.multiplier);
+    const stopDistPoints = stopDistance + assetConfig.spread;
+    let lotSize = riskAmount / (stopDistPoints * assetConfig.multiplier);
     lotSize = Math.floor(lotSize * 1000) / 1000;
-    lotSize = Math.max(0.01, Math.min(lotSize, config.maxLot));
+    lotSize = Math.max(0.01, Math.min(lotSize, assetConfig.maxLot));
     
     return {
-        entry: entry.toFixed(config.digits),
-        sl: sl.toFixed(config.digits),
-        tp: tp.toFixed(config.digits),
-        rrRatio: rr.toFixed(1),
-        lotSize: lotSize.toFixed(2)
+        entry: entry.toFixed(assetConfig.digits),
+        sl: stopLoss.toFixed(assetConfig.digits),
+        tp: takeProfit.toFixed(assetConfig.digits),
+        rrRatio: rr,
+        lotSize: lotSize.toFixed(2),
+        riskDistance: stopDistance
     };
 }
 
-// ========== MAIN STRATEGY ==========
 function analyzeSignal(prices, candles, assetConfig) {
     if (candles.length < 50) {
-        return { bias: 'WAIT', confidence: 30, reason: `Building data (${candles.length}/50)`, atr: 0, currentPrice: prices[prices.length-1] };
+        return { bias: 'WAIT', confidence: 30, reason: `Building data (${candles.length}/50)`, currentPrice: prices[prices.length-1] };
     }
     
     const curPrice = prices[prices.length-1];
@@ -328,45 +492,42 @@ function analyzeSignal(prices, candles, assetConfig) {
     let reasons = [];
     let confidence = 0;
     
-    // ========== BUY SETUP ==========
-    // Must be at SUPPORT or false breakdown
     if (atSupport.atLevel) {
         const targetLevel = fvg ? (fvg.type === 'BULLISH' ? fvg.level2 : fvg.level) : (ob ? ob.level : null);
-        const retraced = targetLevel ? checkRetracement(candles, targetLevel) : false;
+        const retraced = targetLevel ? checkRetracement(candles, targetLevel, 'BUY') : false;
         const sweep = targetLevel ? detectLiquiditySweep(candles, targetLevel) : false;
         
         if (bos && bos.type === 'BULLISH' && retraced && sweep) {
             signal = 'BUY';
             confidence = 75;
-            reasons.push(`BUY at ${atSupport.type} support`);
-            reasons.push(`BOS confirmed`);
-            if (fvg) reasons.push(`FVG retraced`);
-            if (ob) reasons.push(`OB retraced`);
-            reasons.push(`Liquidity sweep confirmed`);
+            reasons.push(`🟢 BUY at ${atSupport.type} support (${atSupport.level.toFixed(assetConfig.digits)})`);
+            reasons.push(`📈 BOS confirmed (broke ${bos.level.toFixed(assetConfig.digits)})`);
+            if (fvg) reasons.push(`📊 FVG retraced (${fvg.level.toFixed(assetConfig.digits)} → ${fvg.level2.toFixed(assetConfig.digits)})`);
+            if (ob) reasons.push(`🔷 OB retraced (${ob.level.toFixed(assetConfig.digits)})`);
+            reasons.push(`💧 Liquidity sweep confirmed`);
+            reasons.push(`✅ Price reversed with 2 bullish candles after touch`);
         }
     }
     
-    // ========== SELL SETUP ==========
-    // Must be at RESISTANCE or false breakout
     if (atResistance.atLevel && !signal) {
         const targetLevel = fvg ? (fvg.type === 'BEARISH' ? fvg.level : fvg.level2) : (ob ? ob.level : null);
-        const retraced = targetLevel ? checkRetracement(candles, targetLevel) : false;
+        const retraced = targetLevel ? checkRetracement(candles, targetLevel, 'SELL') : false;
         const sweep = targetLevel ? detectLiquiditySweep(candles, targetLevel) : false;
         
         if (bos && bos.type === 'BEARISH' && retraced && sweep) {
             signal = 'SELL';
             confidence = 75;
-            reasons.push(`SELL at ${atResistance.type} resistance`);
-            reasons.push(`BOS confirmed`);
-            if (fvg) reasons.push(`FVG retraced`);
-            if (ob) reasons.push(`OB retraced`);
-            reasons.push(`Liquidity sweep confirmed`);
+            reasons.push(`🔴 SELL at ${atResistance.type} resistance (${atResistance.level.toFixed(assetConfig.digits)})`);
+            reasons.push(`📉 BOS confirmed (broke ${bos.level.toFixed(assetConfig.digits)})`);
+            if (fvg) reasons.push(`📊 FVG retraced (${fvg.level.toFixed(assetConfig.digits)} → ${fvg.level2.toFixed(assetConfig.digits)})`);
+            if (ob) reasons.push(`🔷 OB retraced (${ob.level.toFixed(assetConfig.digits)})`);
+            reasons.push(`💧 Liquidity sweep confirmed`);
+            reasons.push(`✅ Price reversed with 2 bearish candles after touch`);
         }
     }
     
-    // Session multiplier
     const sessionMult = getSessionMultiplier();
-    if (signal && sessionMult >= 1.0) reasons.push('High volatility session');
+    if (signal && sessionMult >= 1.0) reasons.push('🔥 High volatility session');
     
     if (signal) {
         confidence = Math.min(85, Math.floor(65 + (sessionMult * 10)));
@@ -375,13 +536,12 @@ function analyzeSignal(prices, candles, assetConfig) {
     return {
         bias: signal || 'WAIT',
         confidence: signal ? confidence : 40,
-        reasons: signal ? reasons : ['No setup found'],
+        reasons: signal ? reasons : ['⏸️ No setup found - waiting for reversal confirmation'],
         currentPrice: curPrice
     };
 }
 
-// ========== TELEGRAM ALERT ==========
-async function sendTelegramAlert(symbolDisplay, signal, assetConfig) {
+async function sendTelegramAlert(symbolDisplay, signal, tradeLevels, assetConfig) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
     
     if (isCooldownActive(symbolDisplay, signal.bias)) {
@@ -389,7 +549,6 @@ async function sendTelegramAlert(symbolDisplay, signal, assetConfig) {
         return false;
     }
     
-    const tradeLevels = calculateTradeLevels(signal.currentPrice, signal.bias, assetConfig);
     const session = getCurrentSession();
     const timestamp = new Date().toLocaleString();
     
@@ -403,7 +562,7 @@ ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.confidence}% conf
 💰 Price: ${signal.currentPrice.toFixed(assetConfig.digits)}
 
 ━━━━━━━━━━━━━━━━━━━
-💡 ${signal.reasons.slice(0, 4).join(', ')}
+💡 ${signal.reasons.slice(0, 4).join('\n')}
 
 ━━━━━━━━━━━━━━━━━━━
 🎯 TRADE SETUP
@@ -413,6 +572,7 @@ ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.confidence}% conf
 📐 Risk/Reward: 1:${tradeLevels.rrRatio}
 💰 Lot Size: ${tradeLevels.lotSize}
 
+━━━━━━━━━━━━━━━━━━━
 ⚠️ Mode: ${DEFAULT_MODE} | Risk: ${DEFAULT_RISK_PERCENT}% | Balance: $${DEFAULT_BALANCE}
     `;
     
@@ -432,7 +592,6 @@ ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.confidence}% conf
     return false;
 }
 
-// ========== CANDLE BUILDER ==========
 function loadCandleHistory(file) {
     const f = path.join(dataDir, `${file}.json`);
     if (fs.existsSync(f)) {
@@ -453,6 +612,9 @@ function saveCandleToHistory(file, candle) {
     if (data.candles.length > 500) data.candles.shift();
     data.currentPrice = candle.close;
     data.timestamp = Date.now();
+    data.high = Math.max(...data.candles.slice(-288).map(c => c.high));
+    data.low = Math.min(...data.candles.slice(-288).map(c => c.low));
+    data.change = ((data.currentPrice - data.candles[data.candles.length-2]?.close) / data.candles[data.candles.length-2]?.close * 100) || 0;
     fs.writeFileSync(f, JSON.stringify(data, null, 2));
 }
 
@@ -494,7 +656,9 @@ async function processAsset(file, priceFetcher, displayName, assetConfig, isOil 
                     const signal = analyzeSignal(prices, candles, assetConfig);
                     console.log(`📊 ${displayName} - ${signal.bias} (${signal.confidence}%) - ${signal.reasons[0]}`);
                     if (signal.bias !== 'WAIT' && signal.confidence >= 60) {
-                        await sendTelegramAlert(displayName, signal, assetConfig);
+                        // Calculate logical trade levels using candle data
+                        const tradeLevels = calculateTradeLevels(signal.currentPrice, signal.bias, assetConfig, candles);
+                        await sendTelegramAlert(displayName, signal, tradeLevels, assetConfig);
                     }
                 }
             }
@@ -519,12 +683,16 @@ async function processAsset(file, priceFetcher, displayName, assetConfig, isOil 
     }
 }
 
-// ========== MAIN ==========
 async function main() {
-    console.log('--- OMNI-SIGNAL INSTITUTIONAL SCALPING v11.0 ---');
+    console.log('--- OMNI-SIGNAL INSTITUTIONAL SCALPING FINAL ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
     console.log(`Alpha Vantage: ${!!ALPHA_VANTAGE_KEY ? '✅' : '❌'}`);
     console.log(`Mode: ${DEFAULT_MODE} | Balance: $${DEFAULT_BALANCE} | Risk: ${DEFAULT_RISK_PERCENT}%`);
+    console.log(`🔧 Features:`);
+    console.log(`   - Fixed retracement (requires 2 confirmation candles)`);
+    console.log(`   - Logical SL based on swing points`);
+    console.log(`   - Logical TP based on next major level`);
+    console.log(`   - Single reliable TP target (1.5x - 4.0x risk)`);
 
     let eurusd, gbpusd, usdjpy, usdcad, usdchf, usdsek;
     try {
