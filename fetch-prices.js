@@ -1,4 +1,4 @@
-// fetch-prices.js – INSTITUTIONAL SCALPING v11.0 (Clean, reliable, no false signals)
+// fetch-prices.js – INSTITUTIONAL SCALPING v11.0 (Clean, reliable, no false signals) 
 
 const fs = require('fs');
 const path = require('path');
