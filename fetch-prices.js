@@ -1,5 +1,5 @@
-// fetch-prices.js – SCALPING OPTIMIZED v5
-// 65-75% win rate target | RR: 1:2 minimum, up to 1:5 | 4-5 winning trades daily
+// fetch-prices.js – SCALPING OPTIMIZED v6
+// MINOR levels filtered by quality (touches count) | MAJOR levels always trade
 
 const fs = require('fs');
 const path = require('path');
@@ -21,24 +21,17 @@ let oilRunCounter = 0;
 
 // ========== ASSET CONFIGURATIONS ==========
 const ASSET_CONFIGS = {
-    // FOREX
     eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0 },
     gbpusd: { multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex', minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.6, maxLot: 5.0 },
     usdjpy: { multiplier: 100, spread: 0.03, digits: 3, class: 'forex', minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.6, maxLot: 5.0 },
     usdcad: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0 },
     usdchf: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0 },
     usdsek: { multiplier: 10000, spread: 0.0003, digits: 5, class: 'forex', minStopPips: 20, maxStopPips: 40, atrMultiplier: 0.6, maxLot: 5.0 },
-    
-    // CRYPTO
-    btcusd: { multiplier: 10, spread: 75.00, digits: 0, class: 'crypto', minStopPips: 1000, maxStopPips: 2500, atrMultiplier: 0.8, maxLot: 0.5 },
-    ethusd: { multiplier: 10, spread: 6.00, digits: 0, class: 'crypto', minStopPips: 60, maxStopPips: 150, atrMultiplier: 0.8, maxLot: 5.0 },
-    solusd: { multiplier: 10, spread: 0.50, digits: 2, class: 'crypto', minStopPips: 6, maxStopPips: 20, atrMultiplier: 0.8, maxLot: 50.0 },
-    
-    // METALS
+    btcusd: { multiplier: 10, spread: 75.00, digits: 0, class: 'crypto', minStopPips: 800, maxStopPips: 2000, atrMultiplier: 0.8, maxLot: 0.5 },
+    ethusd: { multiplier: 10, spread: 6.00, digits: 0, class: 'crypto', minStopPips: 50, maxStopPips: 120, atrMultiplier: 0.8, maxLot: 5.0 },
+    solusd: { multiplier: 10, spread: 0.50, digits: 2, class: 'crypto', minStopPips: 5, maxStopPips: 15, atrMultiplier: 0.8, maxLot: 50.0 },
     xauusd: { multiplier: 100, spread: 0.35, digits: 2, class: 'commodities', minStopPips: 15.0, maxStopPips: 35.0, atrMultiplier: 0.8, maxLot: 0.5 },
     xagusd: { multiplier: 100, spread: 0.04, digits: 3, class: 'commodities', minStopPips: 0.50, maxStopPips: 1.20, atrMultiplier: 0.8, maxLot: 0.5 },
-    
-    // OIL
     wtiusd: { multiplier: 100, spread: 0.05, digits: 2, class: 'commodities', minStopPips: 0.60, maxStopPips: 1.50, atrMultiplier: 0.6, maxLot: 1.0 },
     dxy: { multiplier: 100, spread: 0.05, digits: 4, class: 'forex', minStopPips: 15, maxStopPips: 40, atrMultiplier: 0.6, maxLot: 5.0 }
 };
@@ -202,39 +195,127 @@ function getCurrentSession() {
     return 'OFF_HOURS';
 }
 
-// ========== KEY LEVEL DETECTION ==========
+// ========== KEY LEVEL DETECTION WITH QUALITY SCORING ==========
 function getKeyLevels(candles, currentPrice) {
     const levels = [];
     
-    // MAJOR LEVELS (Daily)
+    // ========== MAJOR LEVELS (Always include, quality 100) ==========
     const dayCandles = candles.slice(-288);
     if (dayCandles.length > 0) {
-        levels.push({ price: Math.max(...dayCandles.map(c => c.high)), type: 'RESISTANCE', strength: 'MAJOR' });
-        levels.push({ price: Math.min(...dayCandles.map(c => c.low)), type: 'SUPPORT', strength: 'MAJOR' });
+        levels.push({ 
+            price: Math.max(...dayCandles.map(c => c.high)), 
+            type: 'RESISTANCE', 
+            strength: 'MAJOR',
+            touches: 0,
+            quality: 100
+        });
+        levels.push({ 
+            price: Math.min(...dayCandles.map(c => c.low)), 
+            type: 'SUPPORT', 
+            strength: 'MAJOR',
+            touches: 0,
+            quality: 100
+        });
     }
     
     // WEEKLY LEVELS
     if (candles.length >= 1440) {
         const weekCandles = candles.slice(-1440);
-        levels.push({ price: Math.max(...weekCandles.map(c => c.high)), type: 'RESISTANCE', strength: 'MAJOR' });
-        levels.push({ price: Math.min(...weekCandles.map(c => c.low)), type: 'SUPPORT', strength: 'MAJOR' });
+        levels.push({ 
+            price: Math.max(...weekCandles.map(c => c.high)), 
+            type: 'RESISTANCE', 
+            strength: 'MAJOR',
+            touches: 0,
+            quality: 100
+        });
+        levels.push({ 
+            price: Math.min(...weekCandles.map(c => c.low)), 
+            type: 'SUPPORT', 
+            strength: 'MAJOR',
+            touches: 0,
+            quality: 100
+        });
     }
     
-    // MINOR LEVELS
-    for (let i = 15; i < candles.length - 15; i++) {
-        const isSwingHigh = candles[i].high > candles[i-5].high && candles[i].high > candles[i-10].high &&
-                            candles[i].high > candles[i+5].high && candles[i].high > candles[i+10].high;
-        const isSwingLow = candles[i].low < candles[i-5].low && candles[i].low < candles[i-10].low &&
-                           candles[i].low < candles[i+5].low && candles[i].low < candles[i+10].low;
-        if (isSwingHigh) levels.push({ price: candles[i].high, type: 'RESISTANCE', strength: 'MINOR' });
-        if (isSwingLow) levels.push({ price: candles[i].low, type: 'SUPPORT', strength: 'MINOR' });
+    // ========== MINOR LEVELS WITH QUALITY SCORE (based on touches) ==========
+    const levelMap = new Map();
+    
+    for (let i = 20; i < candles.length - 5; i++) {
+        const isSwingHigh = candles[i].high > candles[i-2].high && candles[i].high > candles[i-1].high &&
+                            candles[i].high > candles[i+1].high && candles[i].high > candles[i+2].high;
+        const isSwingLow = candles[i].low < candles[i-2].low && candles[i].low < candles[i-1].low &&
+                           candles[i].low < candles[i+1].low && candles[i].low < candles[i+2].low;
+        
+        if (isSwingHigh) {
+            const price = candles[i].high;
+            const rounded = Math.round(price * 100) / 100;
+            
+            // Count touches at this level (how many times price respected it)
+            let touches = 0;
+            for (let j = Math.max(0, i - 30); j <= Math.min(candles.length - 1, i + 10); j++) {
+                if (Math.abs(candles[j].high - price) / price < 0.0003) {
+                    touches++;
+                }
+            }
+            
+            // Quality score: more touches = higher quality
+            // 1 touch = 40 (REJECT), 2 touches = 60, 3+ touches = 80+
+            let quality = Math.min(90, 30 + (touches * 20));
+            
+            if (!levelMap.has(rounded) && quality >= 60) {  // Only store quality 60+
+                levelMap.set(rounded, { price, touches, quality, type: 'RESISTANCE' });
+            }
+        }
+        
+        if (isSwingLow) {
+            const price = candles[i].low;
+            const rounded = Math.round(price * 100) / 100;
+            
+            let touches = 0;
+            for (let j = Math.max(0, i - 30); j <= Math.min(candles.length - 1, i + 10); j++) {
+                if (Math.abs(candles[j].low - price) / price < 0.0003) {
+                    touches++;
+                }
+            }
+            
+            let quality = Math.min(90, 30 + (touches * 20));
+            
+            if (!levelMap.has(rounded) && quality >= 60) {
+                levelMap.set(rounded, { price, touches, quality, type: 'SUPPORT' });
+            }
+        }
     }
     
-    // ROUND NUMBERS
+    // Add qualified MINOR levels
+    for (const [_, level] of levelMap) {
+        levels.push({
+            price: level.price,
+            type: level.type,
+            strength: 'MINOR',
+            touches: level.touches,
+            quality: level.quality
+        });
+    }
+    
+    // ========== ROUND NUMBERS (Only if tested 2+ times) ==========
     const roundNumber = Math.round(currentPrice / 10) * 10;
-    levels.push({ price: roundNumber, type: 'ROUND_NUMBER', strength: 'ROUND' });
+    let roundTouches = 0;
+    for (let i = Math.max(0, candles.length - 100); i < candles.length; i++) {
+        if (Math.abs(candles[i].high - roundNumber) / roundNumber < 0.0003) roundTouches++;
+        if (Math.abs(candles[i].low - roundNumber) / roundNumber < 0.0003) roundTouches++;
+    }
     
-    // Remove duplicates
+    if (roundTouches >= 2) {
+        levels.push({
+            price: roundNumber,
+            type: 'ROUND_NUMBER',
+            strength: 'ROUND',
+            touches: roundTouches,
+            quality: Math.min(80, 50 + roundTouches * 10)
+        });
+    }
+    
+    // Remove duplicates and sort by distance
     const unique = [];
     for (const level of levels) {
         let duplicate = false;
@@ -247,13 +328,16 @@ function getKeyLevels(candles, currentPrice) {
         if (!duplicate) unique.push(level);
     }
     
+    // Sort by distance to current price
+    unique.sort((a, b) => Math.abs(a.price - currentPrice) - Math.abs(b.price - currentPrice));
+    
     return unique;
 }
 
 function isAtSupport(price, levels) {
     for (const level of levels) {
         if (level.type === 'SUPPORT' && Math.abs(price - level.price) / price < 0.0005) {
-            return { atLevel: true, level: level.price, strength: level.strength };
+            return { atLevel: true, level: level.price, strength: level.strength, quality: level.quality || 100 };
         }
     }
     return { atLevel: false };
@@ -262,7 +346,7 @@ function isAtSupport(price, levels) {
 function isAtResistance(price, levels) {
     for (const level of levels) {
         if (level.type === 'RESISTANCE' && Math.abs(price - level.price) / price < 0.0005) {
-            return { atLevel: true, level: level.price, strength: level.strength };
+            return { atLevel: true, level: level.price, strength: level.strength, quality: level.quality || 100 };
         }
     }
     return { atLevel: false };
@@ -314,7 +398,6 @@ function detectLiquiditySweep(candles, level) {
     return false;
 }
 
-// ========== RETRACEMENT DETECTION ==========
 function checkRetracement(candles, level, bias) {
     if (candles.length < 15) return false;
     const recentCandles = candles.slice(-15);
@@ -381,11 +464,11 @@ function detectMSS(candles, bias) {
     if (bias === 'BUY') {
         const higherLow = Math.min(...candlesAfter.map(c => c.low)) > lastSwingLow;
         const higherHigh = Math.max(...candlesAfter.map(c => c.high)) > lastSwingHigh;
-        if (higherLow && higherHigh) return { detected: true, strength: higherHigh && higherLow ? 80 : 60 };
+        if (higherLow && higherHigh) return { detected: true, strength: 80 };
     } else {
         const lowerHigh = Math.max(...candlesAfter.map(c => c.high)) < lastSwingHigh;
         const lowerLow = Math.min(...candlesAfter.map(c => c.low)) < lastSwingLow;
-        if (lowerHigh && lowerLow) return { detected: true, strength: lowerHigh && lowerLow ? 80 : 60 };
+        if (lowerHigh && lowerLow) return { detected: true, strength: 80 };
     }
     return { detected: false, strength: 0 };
 }
@@ -411,10 +494,9 @@ function detectCandlePattern(candles, bias) {
     return { detected: false, pattern: null };
 }
 
-// ========== SCORING SYSTEM ==========
+// ========== SCORING SYSTEM WITH QUALITY FILTER ==========
 function calculateSignalScore(factors) {
     let score = 0;
-    let breakdown = [];
     let positionMultiplier = 1.0;
     let expectedWinRate = 50;
     
@@ -422,53 +504,62 @@ function calculateSignalScore(factors) {
     const hasKeyLevel = factors.atLevel;
     const hasRetrace = factors.retraced;
     const hasSweep = factors.sweep;
-    
-    // CORE REQUIREMENTS
-    if (!hasBOS || !hasKeyLevel) {
-        return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35, breakdown: ['Missing BOS or key level'] };
-    }
-    
-    if (hasRetrace && hasSweep) {
-        score = 50;
-        breakdown.push('Retrace + Sweep: 50');
-    } else if (hasRetrace || hasSweep) {
-        score = 35;
-        breakdown.push(`${hasRetrace ? 'Retrace' : 'Sweep'} only: 35`);
-        expectedWinRate = 55;
-    } else {
-        return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35, breakdown: ['Missing retrace and sweep'] };
-    }
-    
-    // LEVEL STRENGTH
+    const levelQuality = factors.levelQuality || 0;
     const levelStrength = factors.levelStrength || 'MINOR';
     
+    // CORE REQUIREMENTS
+    if (!hasBOS || !hasKeyLevel || !hasRetrace || !hasSweep) {
+        return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
+    }
+    
+    // Base score for meeting core requirements
+    score = 60;
+    
+    // ========== LEVEL QUALITY ADJUSTMENT ==========
     if (levelStrength === 'MAJOR') {
         score += 25;
         positionMultiplier = 1.0;
         expectedWinRate = 78;
-        breakdown.push('MAJOR level: +25 → 78% WR expected');
     } else if (levelStrength === 'MINOR') {
-        score += 0;
-        positionMultiplier = 0.7;
-        expectedWinRate = 62;
-        breakdown.push('MINOR level: 0 → 62% WR expected (70% size)');
+        // MINOR levels NEED quality score to pass
+        if (levelQuality >= 85) {
+            score += 15;
+            positionMultiplier = 0.95;
+            expectedWinRate = 75;
+        } else if (levelQuality >= 75) {
+            score += 10;
+            positionMultiplier = 0.85;
+            expectedWinRate = 70;
+        } else if (levelQuality >= 65) {
+            score += 5;
+            positionMultiplier = 0.75;
+            expectedWinRate = 65;
+        } else if (levelQuality >= 60) {
+            score += 0;
+            positionMultiplier = 0.6;
+            expectedWinRate = 60;
+        } else {
+            // Quality below 60 = REJECT
+            return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
+        }
     } else if (levelStrength === 'ROUND') {
-        score += 10;
-        positionMultiplier = 0.85;
-        expectedWinRate = 70;
-        breakdown.push('Round number: +10 → 70% WR expected (85% size)');
+        if (levelQuality >= 70) {
+            score += 8;
+            positionMultiplier = 0.8;
+            expectedWinRate = 68;
+        } else {
+            return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
+        }
     }
     
     // MSS BONUS
     if (factors.mss && factors.mss.detected) {
         if (factors.mss.strength >= 80) {
-            score += 15;
-            expectedWinRate = Math.min(85, expectedWinRate + 8);
-            breakdown.push(`MSS strong (80): +15 → +8% WR`);
+            score += 12;
+            expectedWinRate = Math.min(85, expectedWinRate + 6);
         } else {
-            score += 8;
-            expectedWinRate = Math.min(85, expectedWinRate + 4);
-            breakdown.push(`MSS weak (60): +8 → +4% WR`);
+            score += 6;
+            expectedWinRate = Math.min(85, expectedWinRate + 3);
         }
     }
     
@@ -476,28 +567,24 @@ function calculateSignalScore(factors) {
     if (factors.candlePattern && factors.candlePattern.detected) {
         score += 10;
         expectedWinRate = Math.min(85, expectedWinRate + 5);
-        breakdown.push(`${factors.candlePattern.pattern}: +10 → +5% WR`);
     }
     
     // FVG
     if (factors.fvg) {
         score += 8;
         expectedWinRate = Math.min(85, expectedWinRate + 3);
-        breakdown.push('FVG: +8 → +3% WR');
     }
     
     // ORDER BLOCK
     if (factors.ob) {
         score += 5;
         expectedWinRate = Math.min(85, expectedWinRate + 2);
-        breakdown.push('Order block: +5 → +2% WR');
     }
     
-    // SESSION BOOST
-    if (factors.sessionBoost && levelStrength !== 'MINOR') {
+    // SESSION BOOST (only for MAJOR levels or high quality MINOR)
+    if (factors.sessionBoost && (levelStrength === 'MAJOR' || levelQuality >= 75)) {
         score += 5;
         expectedWinRate = Math.min(85, expectedWinRate + 2);
-        breakdown.push('London/NY: +5 → +2% WR');
     }
     
     score = Math.min(100, score);
@@ -508,30 +595,25 @@ function calculateSignalScore(factors) {
     
     if (expectedWinRate >= 75) {
         grade = 'A+';
-        positionMultiplier = 1.0;
+        positionMultiplier = Math.min(positionMultiplier, 1.0);
     } else if (expectedWinRate >= 70) {
         grade = 'A';
-        positionMultiplier = 0.95;
+        positionMultiplier = Math.min(positionMultiplier, 0.95);
     } else if (expectedWinRate >= 65) {
         grade = 'B+';
-        positionMultiplier = 0.85;
+        positionMultiplier = Math.min(positionMultiplier, 0.85);
     } else if (expectedWinRate >= 60) {
         grade = 'B';
-        positionMultiplier = 0.7;
-    } else if (expectedWinRate >= 55) {
-        grade = 'C+';
-        positionMultiplier = 0.5;
-        passed = false;
+        positionMultiplier = Math.min(positionMultiplier, 0.7);
+        passed = true;
     } else {
-        grade = 'REJECT';
         passed = false;
-        positionMultiplier = 0;
     }
     
-    return { score, grade, passed, positionMultiplier, expectedWinRate, breakdown };
+    return { score, grade, passed, positionMultiplier, expectedWinRate };
 }
 
-// ========== RISK MANAGEMENT WITH EXTENDED RR ==========
+// ========== RISK MANAGEMENT ==========
 function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
     const { minStopPips, maxStopPips, atrMultiplier, spread } = assetConfig;
     
@@ -606,7 +688,6 @@ function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
     return finalStop;
 }
 
-// ========== EXTENDED RR: Minimum 1:2, can go up to 1:5 ==========
 function findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles) {
     const risk = Math.abs(entry - stopLoss);
     const minRR = 2.0;
@@ -635,7 +716,7 @@ function findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles) {
             }
         }
         
-        const buffer = entry * 0.0005; // 0.05% buffer
+        const buffer = entry * 0.0005;
         
         if (bias === 'BUY') {
             const validResistances = resistanceLevels.filter(r => r > entry);
@@ -677,18 +758,13 @@ function findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles) {
         isExtended = false;
     }
     
-    // If actualRR is less than minRR due to rounding, force minRR
     if (actualRR < minRR) {
         actualRR = minRR;
         takeProfit = bias === 'BUY' ? entry + (risk * minRR) : entry - (risk * minRR);
         isExtended = false;
     }
     
-    return { 
-        takeProfit: takeProfit, 
-        rr: actualRR.toFixed(1),
-        isExtended: isExtended
-    };
+    return { takeProfit, rr: actualRR.toFixed(1), isExtended };
 }
 
 function calculateTradeLevels(price, bias, assetConfig, candles, positionMultiplier) {
@@ -716,9 +792,9 @@ function calculateTradeLevels(price, bias, assetConfig, candles, positionMultipl
     };
 }
 
-// ========== SIGNAL ANALYSIS ==========
+// ========== SIGNAL ANALYSIS WITH QUALITY FILTER ==========
 function analyzeSignal(prices, candles, assetConfig) {
-    if (candles.length < 40) {
+    if (candles.length < 50) {
         return { bias: 'WAIT', confidence: 30, currentPrice: prices[prices.length-1] };
     }
     
@@ -726,7 +802,41 @@ function analyzeSignal(prices, candles, assetConfig) {
     const keyLevels = getKeyLevels(candles, curPrice);
     const atSupport = isAtSupport(curPrice, keyLevels);
     const atResistance = isAtResistance(curPrice, keyLevels);
-    const levelStrength = atSupport.atLevel ? atSupport.strength : (atResistance.atLevel ? atResistance.strength : null);
+    
+    // ========== SESSION FILTER: Only London/NY (8 AM - 4 PM UTC) ==========
+    const currentHour = new Date().getUTCHours();
+    const isLondonOrNY = (currentHour >= 7 && currentHour < 16) || (currentHour >= 12 && currentHour < 20);
+    if (!isLondonOrNY) {
+        return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['⏸️ OFF_HOURS - London/NY only'] };
+    }
+    
+    // Get level strength and quality
+    let levelStrength = null;
+    let levelQuality = 0;
+    let levelPrice = null;
+    let levelType = null;
+    
+    if (atSupport.atLevel) {
+        levelStrength = atSupport.strength;
+        levelQuality = atSupport.quality || 100;
+        levelPrice = atSupport.level;
+        levelType = 'SUPPORT';
+    } else if (atResistance.atLevel) {
+        levelStrength = atResistance.strength;
+        levelQuality = atResistance.quality || 100;
+        levelPrice = atResistance.level;
+        levelType = 'RESISTANCE';
+    }
+    
+    // ========== MINOR LEVEL QUALITY FILTER ==========
+    if (levelStrength === 'MINOR' && levelQuality < 60) {
+        return { 
+            bias: 'WAIT', 
+            grade: 'REJECT', 
+            currentPrice: curPrice, 
+            reasons: [`⏸️ MINOR level at ${levelPrice.toFixed(assetConfig.digits)} has quality ${levelQuality} (need 60+)`] 
+        };
+    }
     
     const bos = detectBOS(candles);
     const fvg = detectFVG(candles);
@@ -760,12 +870,18 @@ function analyzeSignal(prices, candles, assetConfig) {
         candlePattern = detectCandlePattern(candles, 'SELL');
     }
     
+    // REQUIRE both retracement AND sweep
+    if (!retraced || !sweep) {
+        return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['⏸️ Need BOTH retracement AND sweep'] };
+    }
+    
     const scoreResult = calculateSignalScore({
         bos: !!(bos && ((bias === 'BUY' && bos.type === 'BULLISH') || (bias === 'SELL' && bos.type === 'BEARISH'))),
         atLevel: !!(atSupport.atLevel || atResistance.atLevel),
         retraced: retraced,
         sweep: sweep,
         levelStrength: levelStrength,
+        levelQuality: levelQuality,
         mss: mss,
         candlePattern: candlePattern,
         fvg: !!fvg,
@@ -775,19 +891,23 @@ function analyzeSignal(prices, candles, assetConfig) {
     
     let reasons = [];
     if (scoreResult.passed) {
-        reasons.push(`${bias === 'BUY' ? '🟢' : '🔴'} ${bias} | ${scoreResult.grade} (${scoreResult.score}/100) | ${scoreResult.expectedWinRate}% WR expected`);
-        if (atSupport.atLevel) reasons.push(`📍 ${atSupport.strength} SUPPORT at ${atSupport.level.toFixed(assetConfig.digits)}`);
-        if (atResistance.atLevel) reasons.push(`📍 ${atResistance.strength} RESISTANCE at ${atResistance.level.toFixed(assetConfig.digits)}`);
+        reasons.push(`${bias === 'BUY' ? '🟢' : '🔴'} ${bias} | ${scoreResult.grade} | ${scoreResult.expectedWinRate}% WR expected`);
+        
+        if (atSupport.atLevel) {
+            reasons.push(`📍 ${atSupport.strength} SUPPORT at ${atSupport.level.toFixed(assetConfig.digits)} (quality: ${atSupport.quality || 100})`);
+        }
+        if (atResistance.atLevel) {
+            reasons.push(`📍 ${atResistance.strength} RESISTANCE at ${atResistance.level.toFixed(assetConfig.digits)} (quality: ${atResistance.quality || 100})`);
+        }
         if (bos) reasons.push(`📈 BOS at ${bos.level.toFixed(assetConfig.digits)}`);
         if (retraced) reasons.push(`✅ Retracement confirmed`);
-        if (sweep) reasons.push(`💧 Liquidity sweep`);
-        if (mss.detected) reasons.push(`🔄 MSS (${mss.strength})`);
+        if (sweep) reasons.push(`💧 Liquidity sweep confirmed`);
+        if (mss.detected) reasons.push(`🔄 MSS confirmed (${mss.strength})`);
         if (candlePattern.detected) reasons.push(`🕯️ ${candlePattern.pattern}`);
         if (fvg) reasons.push(`📊 FVG: ${fvg.level.toFixed(assetConfig.digits)} → ${fvg.level2.toFixed(assetConfig.digits)}`);
         if (ob) reasons.push(`🔷 OB at ${ob.level.toFixed(assetConfig.digits)}`);
-        reasons.push(`📊 ${scoreResult.breakdown.join(' + ')} = ${scoreResult.score}`);
         
-        if (scoreResult.positionMultiplier < 1.0) {
+        if (scoreResult.positionMultiplier < 1.0 && scoreResult.positionMultiplier > 0) {
             reasons.push(`⚠️ Position size: ${Math.round(scoreResult.positionMultiplier * 100)}% of calculated`);
         }
         
@@ -808,7 +928,7 @@ function analyzeSignal(prices, candles, assetConfig) {
         bias: 'WAIT',
         confidence: 40,
         grade: 'REJECT',
-        reasons: [`❌ ${scoreResult.breakdown.join(', ')}`],
+        reasons: [`❌ ${scoreResult.breakdown?.join(', ') || 'Signal rejected'}`],
         currentPrice: curPrice
     };
 }
@@ -922,7 +1042,7 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
                 saveCandleToHistory(file, completed);
                 candles.push(completed);
                 
-                if (candles.length >= 40) {
+                if (candles.length >= 50) {
                     const prices = candles.map(c => c.close);
                     const signal = analyzeSignal(prices, candles, assetConfig);
                     console.log(`📊 ${displayName} - ${signal.bias} | ${signal.grade} | ${signal.expectedWinRate || 0}% WR`);
@@ -956,9 +1076,9 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
 }
 
 async function main() {
-    console.log('--- OMNI-SIGNAL v5 (Extended RR: 1:2 to 1:5 | 65-75% WR Target) ---');
+    console.log('--- OMNI-SIGNAL v6 (Quality-Filtered MINOR Levels) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
-    console.log(`Rules: Retrace + Sweep REQUIRED | RR minimum 1:2, up to 1:5 | Minor = 70% size`);
+    console.log(`Rules: MAJOR levels always | MINOR levels need quality 60+ | London/NY only`);
 
     let eurusd, gbpusd, usdjpy, usdcad, usdchf, usdsek;
     try {
