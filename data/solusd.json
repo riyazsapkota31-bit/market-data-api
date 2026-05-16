@@ -1,13 +1,6 @@
 {
   "candles": [
     {
-      "timestamp": 1778784045512,
-      "open": 93.24,
-      "high": 93.24,
-      "low": 93.2,
-      "close": 93.2
-    },
-    {
       "timestamp": 1778784395743,
       "open": 93.21,
       "high": 93.21,
@@ -3499,11 +3492,18 @@
       "high": 86.11,
       "low": 86.06,
       "close": 86.06
+    },
+    {
+      "timestamp": 1778934038214,
+      "open": 86.02,
+      "high": 86.04,
+      "low": 86.02,
+      "close": 86.04
     }
   ],
-  "currentPrice": 86.06,
-  "timestamp": 1778934038214,
-  "high": 90.91,
+  "currentPrice": 86.04,
+  "timestamp": 1778934388647,
+  "high": 90.83,
   "low": 85.69,
   "change": 0.011007154650528473
 }
