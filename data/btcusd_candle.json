@@ -1,12 +1,12 @@
 {
-  "bucket": 5930010,
-  "startTime": 1779003048218,
+  "bucket": 5930011,
+  "startTime": 1779003390352,
   "candle": {
-    "open": 78093,
-    "high": 78141,
-    "low": 78093,
-    "close": 78141
+    "open": 78154,
+    "high": 78154,
+    "low": 78154,
+    "close": 78154
   },
-  "lastPrice": 78141,
-  "lastTimestamp": 1779003048218
+  "lastPrice": 78154,
+  "lastTimestamp": 1779003390352
 }
