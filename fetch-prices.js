@@ -1,5 +1,6 @@
-// fetch-prices.js – SCALPING OPTIMIZED v6
-// MINOR levels filtered by quality (touches count) | MAJOR levels always trade
+// fetch-prices.js – SCALPING OPTIMIZED v6.2
+// CHANGES: Session filter removed (trade 24/7). Minor quality threshold 50. Retrace OR sweep.
+// All other features unchanged.
 
 const fs = require('fs');
 const path = require('path');
@@ -36,7 +37,7 @@ const ASSET_CONFIGS = {
     dxy: { multiplier: 100, spread: 0.05, digits: 4, class: 'forex', minStopPips: 15, maxStopPips: 40, atrMultiplier: 0.6, maxLot: 5.0 }
 };
 
-// ========== UTILITY FUNCTIONS ==========
+// ========== UTILITY FUNCTIONS (unchanged) ==========
 function loadSignalTracking() {
     if (fs.existsSync(SIGNAL_TRACKING_FILE)) {
         try { return JSON.parse(fs.readFileSync(SIGNAL_TRACKING_FILE)); } catch(e) {}
@@ -199,47 +200,22 @@ function getCurrentSession() {
 function getKeyLevels(candles, currentPrice) {
     const levels = [];
     
-    // ========== MAJOR LEVELS (Always include, quality 100) ==========
+    // MAJOR LEVELS
     const dayCandles = candles.slice(-288);
     if (dayCandles.length > 0) {
-        levels.push({ 
-            price: Math.max(...dayCandles.map(c => c.high)), 
-            type: 'RESISTANCE', 
-            strength: 'MAJOR',
-            touches: 0,
-            quality: 100
-        });
-        levels.push({ 
-            price: Math.min(...dayCandles.map(c => c.low)), 
-            type: 'SUPPORT', 
-            strength: 'MAJOR',
-            touches: 0,
-            quality: 100
-        });
+        levels.push({ price: Math.max(...dayCandles.map(c => c.high)), type: 'RESISTANCE', strength: 'MAJOR', touches: 0, quality: 100 });
+        levels.push({ price: Math.min(...dayCandles.map(c => c.low)), type: 'SUPPORT', strength: 'MAJOR', touches: 0, quality: 100 });
     }
     
     // WEEKLY LEVELS
     if (candles.length >= 1440) {
         const weekCandles = candles.slice(-1440);
-        levels.push({ 
-            price: Math.max(...weekCandles.map(c => c.high)), 
-            type: 'RESISTANCE', 
-            strength: 'MAJOR',
-            touches: 0,
-            quality: 100
-        });
-        levels.push({ 
-            price: Math.min(...weekCandles.map(c => c.low)), 
-            type: 'SUPPORT', 
-            strength: 'MAJOR',
-            touches: 0,
-            quality: 100
-        });
+        levels.push({ price: Math.max(...weekCandles.map(c => c.high)), type: 'RESISTANCE', strength: 'MAJOR', touches: 0, quality: 100 });
+        levels.push({ price: Math.min(...weekCandles.map(c => c.low)), type: 'SUPPORT', strength: 'MAJOR', touches: 0, quality: 100 });
     }
     
-    // ========== MINOR LEVELS WITH QUALITY SCORE (based on touches) ==========
+    // MINOR LEVELS WITH QUALITY (lowered threshold to 50)
     const levelMap = new Map();
-    
     for (let i = 20; i < candles.length - 5; i++) {
         const isSwingHigh = candles[i].high > candles[i-2].high && candles[i].high > candles[i-1].high &&
                             candles[i].high > candles[i+1].high && candles[i].high > candles[i+2].high;
@@ -249,20 +225,12 @@ function getKeyLevels(candles, currentPrice) {
         if (isSwingHigh) {
             const price = candles[i].high;
             const rounded = Math.round(price * 100) / 100;
-            
-            // Count touches at this level (how many times price respected it)
             let touches = 0;
             for (let j = Math.max(0, i - 30); j <= Math.min(candles.length - 1, i + 10); j++) {
-                if (Math.abs(candles[j].high - price) / price < 0.0003) {
-                    touches++;
-                }
+                if (Math.abs(candles[j].high - price) / price < 0.0003) touches++;
             }
-            
-            // Quality score: more touches = higher quality
-            // 1 touch = 40 (REJECT), 2 touches = 60, 3+ touches = 80+
             let quality = Math.min(90, 30 + (touches * 20));
-            
-            if (!levelMap.has(rounded) && quality >= 60) {  // Only store quality 60+
+            if (!levelMap.has(rounded) && quality >= 50) {   // <--- lowered from 60 to 50
                 levelMap.set(rounded, { price, touches, quality, type: 'RESISTANCE' });
             }
         }
@@ -270,23 +238,17 @@ function getKeyLevels(candles, currentPrice) {
         if (isSwingLow) {
             const price = candles[i].low;
             const rounded = Math.round(price * 100) / 100;
-            
             let touches = 0;
             for (let j = Math.max(0, i - 30); j <= Math.min(candles.length - 1, i + 10); j++) {
-                if (Math.abs(candles[j].low - price) / price < 0.0003) {
-                    touches++;
-                }
+                if (Math.abs(candles[j].low - price) / price < 0.0003) touches++;
             }
-            
             let quality = Math.min(90, 30 + (touches * 20));
-            
-            if (!levelMap.has(rounded) && quality >= 60) {
+            if (!levelMap.has(rounded) && quality >= 50) {
                 levelMap.set(rounded, { price, touches, quality, type: 'SUPPORT' });
             }
         }
     }
     
-    // Add qualified MINOR levels
     for (const [_, level] of levelMap) {
         levels.push({
             price: level.price,
@@ -297,14 +259,13 @@ function getKeyLevels(candles, currentPrice) {
         });
     }
     
-    // ========== ROUND NUMBERS (Only if tested 2+ times) ==========
+    // ROUND NUMBERS (unchanged)
     const roundNumber = Math.round(currentPrice / 10) * 10;
     let roundTouches = 0;
     for (let i = Math.max(0, candles.length - 100); i < candles.length; i++) {
         if (Math.abs(candles[i].high - roundNumber) / roundNumber < 0.0003) roundTouches++;
         if (Math.abs(candles[i].low - roundNumber) / roundNumber < 0.0003) roundTouches++;
     }
-    
     if (roundTouches >= 2) {
         levels.push({
             price: roundNumber,
@@ -327,10 +288,7 @@ function getKeyLevels(candles, currentPrice) {
         }
         if (!duplicate) unique.push(level);
     }
-    
-    // Sort by distance to current price
     unique.sort((a, b) => Math.abs(a.price - currentPrice) - Math.abs(b.price - currentPrice));
-    
     return unique;
 }
 
@@ -352,7 +310,7 @@ function isAtResistance(price, levels) {
     return { atLevel: false };
 }
 
-// ========== PATTERN DETECTION ==========
+// ========== PATTERN DETECTION (unchanged) ==========
 function detectBOS(candles) {
     if (candles.length < 30) return null;
     const highs = candles.map(c => c.high);
@@ -361,7 +319,6 @@ function detectBOS(candles) {
     const previousHigh = Math.max(...highs.slice(-20, -10));
     const recentLow = Math.min(...lows.slice(-10));
     const previousLow = Math.min(...lows.slice(-20, -10));
-    
     if (recentHigh > previousHigh) return { type: 'BULLISH', level: previousHigh };
     if (recentLow < previousLow) return { type: 'BEARISH', level: previousLow };
     return null;
@@ -401,23 +358,14 @@ function detectLiquiditySweep(candles, level) {
 function checkRetracement(candles, level, bias) {
     if (candles.length < 15) return false;
     const recentCandles = candles.slice(-15);
-    
     let sweepIndex = -1;
     for (let i = recentCandles.length - 1; i >= 0; i--) {
-        if (bias === 'BUY' && recentCandles[i].low <= level) {
-            sweepIndex = i;
-            break;
-        }
-        if (bias === 'SELL' && recentCandles[i].high >= level) {
-            sweepIndex = i;
-            break;
-        }
+        if (bias === 'BUY' && recentCandles[i].low <= level) { sweepIndex = i; break; }
+        if (bias === 'SELL' && recentCandles[i].high >= level) { sweepIndex = i; break; }
     }
-    
     if (sweepIndex === -1 || sweepIndex >= recentCandles.length - 4) return false;
     const afterSweep = recentCandles.slice(sweepIndex + 1);
     if (afterSweep.length < 3) return false;
-    
     if (bias === 'BUY') {
         let bullishCount = 0;
         for (let i = 0; i < afterSweep.length; i++) {
@@ -447,7 +395,6 @@ function detectMSS(candles, bias) {
     if (candles.length < 20) return { detected: false, strength: 0 };
     const recentCandles = candles.slice(-18);
     let lastSwingHigh = -Infinity, lastSwingLow = Infinity, swingIndex = -1;
-    
     for (let i = 4; i < recentCandles.length - 4; i++) {
         const isSwingHigh = recentCandles[i].high > recentCandles[i-1].high && recentCandles[i].high > recentCandles[i-2].high &&
                             recentCandles[i].high > recentCandles[i+1].high && recentCandles[i].high > recentCandles[i+2].high;
@@ -456,11 +403,9 @@ function detectMSS(candles, bias) {
         if (isSwingHigh && recentCandles[i].high > lastSwingHigh) { lastSwingHigh = recentCandles[i].high; swingIndex = i; }
         if (isSwingLow && recentCandles[i].low < lastSwingLow) { lastSwingLow = recentCandles[i].low; swingIndex = i; }
     }
-    
     if (swingIndex === -1 || swingIndex >= recentCandles.length - 3) return { detected: false, strength: 0 };
     const candlesAfter = recentCandles.slice(swingIndex + 1);
     if (candlesAfter.length < 3) return { detected: false, strength: 0 };
-    
     if (bias === 'BUY') {
         const higherLow = Math.min(...candlesAfter.map(c => c.low)) > lastSwingLow;
         const higherHigh = Math.max(...candlesAfter.map(c => c.high)) > lastSwingHigh;
@@ -477,7 +422,6 @@ function detectCandlePattern(candles, bias) {
     if (candles.length < 2) return { detected: false, pattern: null };
     const last = candles[candles.length - 1];
     const prev = candles[candles.length - 2];
-    
     if (bias === 'BUY') {
         const bullishEngulfing = prev.close < prev.open && last.close > last.open && last.close > prev.open && last.open < prev.close;
         if (bullishEngulfing) return { detected: true, pattern: 'BULLISH_ENGULFING' };
@@ -494,12 +438,11 @@ function detectCandlePattern(candles, bias) {
     return { detected: false, pattern: null };
 }
 
-// ========== SCORING SYSTEM WITH QUALITY FILTER ==========
+// ========== SCORING SYSTEM (quality threshold now 50) ==========
 function calculateSignalScore(factors) {
     let score = 0;
     let positionMultiplier = 1.0;
     let expectedWinRate = 50;
-    
     const hasBOS = factors.bos;
     const hasKeyLevel = factors.atLevel;
     const hasRetrace = factors.retraced;
@@ -507,21 +450,23 @@ function calculateSignalScore(factors) {
     const levelQuality = factors.levelQuality || 0;
     const levelStrength = factors.levelStrength || 'MINOR';
     
-    // CORE REQUIREMENTS
-    if (!hasBOS || !hasKeyLevel || !hasRetrace || !hasSweep) {
+    if (!hasBOS || !hasKeyLevel) {
         return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
     }
     
-    // Base score for meeting core requirements
-    score = 60;
+    // Changed: require at least one of retrace OR sweep (instead of both)
+    if (!hasRetrace && !hasSweep) {
+        return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
+    }
     
-    // ========== LEVEL QUALITY ADJUSTMENT ==========
+    // Base score starts at 50 if at least one is true
+    score = 50;
+    
     if (levelStrength === 'MAJOR') {
         score += 25;
         positionMultiplier = 1.0;
         expectedWinRate = 78;
     } else if (levelStrength === 'MINOR') {
-        // MINOR levels NEED quality score to pass
         if (levelQuality >= 85) {
             score += 15;
             positionMultiplier = 0.95;
@@ -534,12 +479,11 @@ function calculateSignalScore(factors) {
             score += 5;
             positionMultiplier = 0.75;
             expectedWinRate = 65;
-        } else if (levelQuality >= 60) {
+        } else if (levelQuality >= 50) {  // <-- lowered from 60 to 50
             score += 0;
             positionMultiplier = 0.6;
             expectedWinRate = 60;
         } else {
-            // Quality below 60 = REJECT
             return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
         }
     } else if (levelStrength === 'ROUND') {
@@ -552,7 +496,12 @@ function calculateSignalScore(factors) {
         }
     }
     
-    // MSS BONUS
+    // Bonus for having BOTH retrace AND sweep
+    if (hasRetrace && hasSweep) {
+        score += 10;
+        expectedWinRate = Math.min(85, expectedWinRate + 5);
+    }
+    
     if (factors.mss && factors.mss.detected) {
         if (factors.mss.strength >= 80) {
             score += 12;
@@ -562,26 +511,18 @@ function calculateSignalScore(factors) {
             expectedWinRate = Math.min(85, expectedWinRate + 3);
         }
     }
-    
-    // CANDLE PATTERN
     if (factors.candlePattern && factors.candlePattern.detected) {
         score += 10;
         expectedWinRate = Math.min(85, expectedWinRate + 5);
     }
-    
-    // FVG
     if (factors.fvg) {
         score += 8;
         expectedWinRate = Math.min(85, expectedWinRate + 3);
     }
-    
-    // ORDER BLOCK
     if (factors.ob) {
         score += 5;
         expectedWinRate = Math.min(85, expectedWinRate + 2);
     }
-    
-    // SESSION BOOST (only for MAJOR levels or high quality MINOR)
     if (factors.sessionBoost && (levelStrength === 'MAJOR' || levelQuality >= 75)) {
         score += 5;
         expectedWinRate = Math.min(85, expectedWinRate + 2);
@@ -592,31 +533,18 @@ function calculateSignalScore(factors) {
     
     let grade = 'B';
     let passed = true;
-    
-    if (expectedWinRate >= 75) {
-        grade = 'A+';
-        positionMultiplier = Math.min(positionMultiplier, 1.0);
-    } else if (expectedWinRate >= 70) {
-        grade = 'A';
-        positionMultiplier = Math.min(positionMultiplier, 0.95);
-    } else if (expectedWinRate >= 65) {
-        grade = 'B+';
-        positionMultiplier = Math.min(positionMultiplier, 0.85);
-    } else if (expectedWinRate >= 60) {
-        grade = 'B';
-        positionMultiplier = Math.min(positionMultiplier, 0.7);
-        passed = true;
-    } else {
-        passed = false;
-    }
+    if (expectedWinRate >= 75) { grade = 'A+'; positionMultiplier = Math.min(positionMultiplier, 1.0); }
+    else if (expectedWinRate >= 70) { grade = 'A'; positionMultiplier = Math.min(positionMultiplier, 0.95); }
+    else if (expectedWinRate >= 65) { grade = 'B+'; positionMultiplier = Math.min(positionMultiplier, 0.85); }
+    else if (expectedWinRate >= 60) { grade = 'B'; positionMultiplier = Math.min(positionMultiplier, 0.7); passed = true; }
+    else { passed = false; }
     
     return { score, grade, passed, positionMultiplier, expectedWinRate };
 }
 
-// ========== RISK MANAGEMENT ==========
+// ========== RISK MANAGEMENT (unchanged) ==========
 function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
     const { minStopPips, maxStopPips, atrMultiplier, spread } = assetConfig;
-    
     let atrStop = minStopPips;
     if (candles && candles.length >= 20) {
         const recentCandles = candles.slice(-20);
@@ -632,7 +560,6 @@ function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
         const avgTR = sumTR / (recentCandles.length - 1);
         atrStop = avgTR * atrMultiplier;
     }
-    
     let swingStop = null;
     if (candles && candles.length >= 40) {
         const recentCandles = candles.slice(-40);
@@ -649,7 +576,6 @@ function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
                 swingPoints.push({ price: recentCandles[i].high, type: 'HIGH' });
             }
         }
-        
         const buffer = currentPrice * 0.001;
         if (bias === 'BUY') {
             const validLows = swingPoints.filter(p => p.type === 'LOW' && p.price < currentPrice && (currentPrice - p.price) >= minStopPips);
@@ -665,7 +591,6 @@ function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
             }
         }
     }
-    
     let finalStop, stopDistance;
     if (swingStop) {
         stopDistance = Math.abs(currentPrice - swingStop);
@@ -674,17 +599,14 @@ function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
         stopDistance = Math.max(atrStop, minStopPips);
         finalStop = bias === 'BUY' ? currentPrice - stopDistance : currentPrice + stopDistance;
     }
-    
     if (stopDistance > maxStopPips) {
         stopDistance = maxStopPips;
         finalStop = bias === 'BUY' ? currentPrice - maxStopPips : currentPrice + maxStopPips;
     }
-    
     const minSafeDistance = spread * 3;
     if (stopDistance < minSafeDistance) {
         finalStop = bias === 'BUY' ? currentPrice - minSafeDistance : currentPrice + minSafeDistance;
     }
-    
     return finalStop;
 }
 
@@ -692,32 +614,23 @@ function findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles) {
     const risk = Math.abs(entry - stopLoss);
     const minRR = 2.0;
     const maxRR = 5.0;
-    
     let logicalTP = null;
     let actualRR = minRR;
-    
     if (candles && candles.length >= 50) {
         const recentCandles = candles.slice(-50);
         const resistanceLevels = [];
         const supportLevels = [];
-        
         for (let i = 5; i < recentCandles.length - 5; i++) {
-            if (recentCandles[i].high > recentCandles[i-1].high && 
-                recentCandles[i].high > recentCandles[i+1].high &&
-                recentCandles[i].high > recentCandles[i-2].high &&
-                recentCandles[i].high > recentCandles[i+2].high) {
+            if (recentCandles[i].high > recentCandles[i-1].high && recentCandles[i].high > recentCandles[i+1].high &&
+                recentCandles[i].high > recentCandles[i-2].high && recentCandles[i].high > recentCandles[i+2].high) {
                 resistanceLevels.push(recentCandles[i].high);
             }
-            if (recentCandles[i].low < recentCandles[i-1].low && 
-                recentCandles[i].low < recentCandles[i+1].low &&
-                recentCandles[i].low < recentCandles[i-2].low &&
-                recentCandles[i].low < recentCandles[i+2].low) {
+            if (recentCandles[i].low < recentCandles[i-1].low && recentCandles[i].low < recentCandles[i+1].low &&
+                recentCandles[i].low < recentCandles[i-2].low && recentCandles[i].low < recentCandles[i+2].low) {
                 supportLevels.push(recentCandles[i].low);
             }
         }
-        
         const buffer = entry * 0.0005;
-        
         if (bias === 'BUY') {
             const validResistances = resistanceLevels.filter(r => r > entry);
             validResistances.sort((a, b) => a - b);
@@ -742,10 +655,8 @@ function findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles) {
             }
         }
     }
-    
     let takeProfit;
     let isExtended = false;
-    
     if (logicalTP && actualRR > minRR) {
         takeProfit = logicalTP;
         isExtended = true;
@@ -757,13 +668,11 @@ function findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles) {
         actualRR = minRR;
         isExtended = false;
     }
-    
     if (actualRR < minRR) {
         actualRR = minRR;
         takeProfit = bias === 'BUY' ? entry + (risk * minRR) : entry - (risk * minRR);
         isExtended = false;
     }
-    
     return { takeProfit, rr: actualRR.toFixed(1), isExtended };
 }
 
@@ -771,9 +680,7 @@ function calculateTradeLevels(price, bias, assetConfig, candles, positionMultipl
     const stopLoss = findLogicalStopLoss(candles, price, bias, assetConfig);
     const entry = price;
     const { takeProfit, rr, isExtended } = findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles);
-    
     if (parseFloat(rr) < 2.0) return null;
-    
     const riskAmount = DEFAULT_BALANCE * (DEFAULT_RISK_PERCENT / 100);
     const stopDistPoints = Math.abs(entry - stopLoss) + assetConfig.spread;
     let lotSize = riskAmount / (stopDistPoints * assetConfig.multiplier);
@@ -781,7 +688,6 @@ function calculateTradeLevels(price, bias, assetConfig, candles, positionMultipl
     lotSize = Math.max(0.01, Math.min(lotSize, assetConfig.maxLot));
     lotSize = lotSize * positionMultiplier;
     lotSize = Math.floor(lotSize * 1000) / 1000;
-    
     return {
         entry: entry.toFixed(assetConfig.digits),
         sl: stopLoss.toFixed(assetConfig.digits),
@@ -792,7 +698,7 @@ function calculateTradeLevels(price, bias, assetConfig, candles, positionMultipl
     };
 }
 
-// ========== SIGNAL ANALYSIS WITH QUALITY FILTER ==========
+// ========== SIGNAL ANALYSIS – SESSION FILTER REMOVED ==========
 function analyzeSignal(prices, candles, assetConfig) {
     if (candles.length < 50) {
         return { bias: 'WAIT', confidence: 30, currentPrice: prices[prices.length-1] };
@@ -803,12 +709,8 @@ function analyzeSignal(prices, candles, assetConfig) {
     const atSupport = isAtSupport(curPrice, keyLevels);
     const atResistance = isAtResistance(curPrice, keyLevels);
     
-    // ========== SESSION FILTER: Only London/NY (8 AM - 4 PM UTC) ==========
-    const currentHour = new Date().getUTCHours();
-    const isLondonOrNY = (currentHour >= 7 && currentHour < 16) || (currentHour >= 12 && currentHour < 20);
-    if (!isLondonOrNY) {
-        return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['⏸️ OFF_HOURS - London/NY only'] };
-    }
+    // ========== SESSION FILTER REMOVED – trade 24/7 ==========
+    // No time restrictions
     
     // Get level strength and quality
     let levelStrength = null;
@@ -828,20 +730,20 @@ function analyzeSignal(prices, candles, assetConfig) {
         levelType = 'RESISTANCE';
     }
     
-    // ========== MINOR LEVEL QUALITY FILTER ==========
-    if (levelStrength === 'MINOR' && levelQuality < 60) {
+    // Minor quality filter (lowered to 50)
+    if (levelStrength === 'MINOR' && levelQuality < 50) {
         return { 
             bias: 'WAIT', 
             grade: 'REJECT', 
             currentPrice: curPrice, 
-            reasons: [`⏸️ MINOR level at ${levelPrice.toFixed(assetConfig.digits)} has quality ${levelQuality} (need 60+)`] 
+            reasons: [`⏸️ MINOR level quality ${levelQuality} < 50`] 
         };
     }
     
     const bos = detectBOS(candles);
     const fvg = detectFVG(candles);
     const ob = detectOrderBlock(candles);
-    const sessionBoost = getSessionMultiplier() >= 1.0;
+    const sessionBoost = getSessionMultiplier() >= 1.0; // still used for scoring
     
     let bias = null;
     let targetLevel = null;
@@ -870,9 +772,9 @@ function analyzeSignal(prices, candles, assetConfig) {
         candlePattern = detectCandlePattern(candles, 'SELL');
     }
     
-    // REQUIRE both retracement AND sweep
-    if (!retraced || !sweep) {
-        return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['⏸️ Need BOTH retracement AND sweep'] };
+    // Require at least one of retrace OR sweep (already handled in scoring)
+    if (!retraced && !sweep) {
+        return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['⏸️ No retracement or sweep'] };
     }
     
     const scoreResult = calculateSignalScore({
@@ -892,13 +794,8 @@ function analyzeSignal(prices, candles, assetConfig) {
     let reasons = [];
     if (scoreResult.passed) {
         reasons.push(`${bias === 'BUY' ? '🟢' : '🔴'} ${bias} | ${scoreResult.grade} | ${scoreResult.expectedWinRate}% WR expected`);
-        
-        if (atSupport.atLevel) {
-            reasons.push(`📍 ${atSupport.strength} SUPPORT at ${atSupport.level.toFixed(assetConfig.digits)} (quality: ${atSupport.quality || 100})`);
-        }
-        if (atResistance.atLevel) {
-            reasons.push(`📍 ${atResistance.strength} RESISTANCE at ${atResistance.level.toFixed(assetConfig.digits)} (quality: ${atResistance.quality || 100})`);
-        }
+        if (atSupport.atLevel) reasons.push(`📍 ${atSupport.strength} SUPPORT at ${atSupport.level.toFixed(assetConfig.digits)} (quality: ${atSupport.quality || 100})`);
+        if (atResistance.atLevel) reasons.push(`📍 ${atResistance.strength} RESISTANCE at ${atResistance.level.toFixed(assetConfig.digits)} (quality: ${atResistance.quality || 100})`);
         if (bos) reasons.push(`📈 BOS at ${bos.level.toFixed(assetConfig.digits)}`);
         if (retraced) reasons.push(`✅ Retracement confirmed`);
         if (sweep) reasons.push(`💧 Liquidity sweep confirmed`);
@@ -906,13 +803,10 @@ function analyzeSignal(prices, candles, assetConfig) {
         if (candlePattern.detected) reasons.push(`🕯️ ${candlePattern.pattern}`);
         if (fvg) reasons.push(`📊 FVG: ${fvg.level.toFixed(assetConfig.digits)} → ${fvg.level2.toFixed(assetConfig.digits)}`);
         if (ob) reasons.push(`🔷 OB at ${ob.level.toFixed(assetConfig.digits)}`);
-        
         if (scoreResult.positionMultiplier < 1.0 && scoreResult.positionMultiplier > 0) {
             reasons.push(`⚠️ Position size: ${Math.round(scoreResult.positionMultiplier * 100)}% of calculated`);
         }
-        
         let confidence = Math.min(85, 50 + Math.floor(scoreResult.score / 2.5));
-        
         return {
             bias: bias,
             confidence: confidence,
@@ -933,16 +827,14 @@ function analyzeSignal(prices, candles, assetConfig) {
     };
 }
 
+// ========== TELEGRAM & CANDLE MANAGEMENT (unchanged) ==========
 async function sendTelegramAlert(symbolDisplay, signal, tradeLevels, assetConfig) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
     if (isCooldownActive(symbolDisplay, signal.bias)) return false;
     if (isDuplicateSignal(symbolDisplay, signal.bias, signal.currentPrice)) return false;
-    
     const session = getCurrentSession();
     const timestamp = new Date().toLocaleString();
-    
     const rrDisplay = tradeLevels.isExtendedRR ? `1:${tradeLevels.rrRatio} 🚀 EXTENDED` : `1:${tradeLevels.rrRatio}`;
-    
     const message = `
 🤖 OMNI-SIGNAL ALERT 🤖
 ━━━━━━━━━━━━━━━━━━━
@@ -965,7 +857,6 @@ ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.grade} (${signal.
 
 ⚠️ Mode: SCALP | Risk: 1% | Balance: $${DEFAULT_BALANCE}
     `;
-    
     try {
         const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
             method: 'POST',
@@ -982,7 +873,6 @@ ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.grade} (${signal.
     return false;
 }
 
-// ========== CANDLE MANAGEMENT ==========
 function loadCandleHistory(file) {
     const f = path.join(dataDir, `${file}.json`);
     if (fs.existsSync(f)) {
@@ -1023,13 +913,11 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
     try {
         let price = await priceFetcher();
         if (!price) throw new Error('No price');
-        
         const now = Date.now();
         const minute = Math.floor(now / 60000);
         const bucket = Math.floor(minute / 5);
         let state = loadCandleState(file);
         let candles = loadCandleHistory(file);
-        
         if (!state || state.bucket !== bucket) {
             if (state && state.candle && state.lastPrice) {
                 const completed = {
@@ -1041,12 +929,10 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
                 };
                 saveCandleToHistory(file, completed);
                 candles.push(completed);
-                
                 if (candles.length >= 50) {
                     const prices = candles.map(c => c.close);
                     const signal = analyzeSignal(prices, candles, assetConfig);
                     console.log(`📊 ${displayName} - ${signal.bias} | ${signal.grade} | ${signal.expectedWinRate || 0}% WR`);
-                    
                     if (signal.bias !== 'WAIT' && signal.grade !== 'REJECT') {
                         const tradeLevels = calculateTradeLevels(signal.currentPrice, signal.bias, assetConfig, candles, signal.positionMultiplier || 1.0);
                         if (tradeLevels && parseFloat(tradeLevels.rrRatio) >= 2.0) {
@@ -1076,9 +962,9 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
 }
 
 async function main() {
-    console.log('--- OMNI-SIGNAL v6 (Quality-Filtered MINOR Levels) ---');
+    console.log('--- OMNI-SIGNAL v6.2 (Session filter removed, minor quality 50, retrace OR sweep) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
-    console.log(`Rules: MAJOR levels always | MINOR levels need quality 60+ | London/NY only`);
+    console.log(`Rules: 24/7 trading | Minor quality >=50 | Retrace OR sweep required | BOS required`);
 
     let eurusd, gbpusd, usdjpy, usdcad, usdchf, usdsek;
     try {
@@ -1116,7 +1002,6 @@ async function main() {
         await processAsset(assets[i].file, assets[i].fetcher, assets[i].display, assets[i].config);
         if (i < assets.length - 1) await new Promise(r => setTimeout(r, 1500));
     }
-    
     console.log('--- Completed ---');
 }
 
