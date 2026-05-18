@@ -1,6 +1,5 @@
-// fetch-prices.js – SCALPING OPTIMIZED v6.2
-// CHANGES: Session filter removed (trade 24/7). Minor quality threshold 50. Retrace OR sweep.
-// All other features unchanged.
+// fetch-prices.js – SCALPING OPTIMIZED v6.3
+// FIXED: Candle formation (bucket based on 5-min boundaries) – all other features unchanged.
 
 const fs = require('fs');
 const path = require('path');
@@ -20,7 +19,7 @@ const COOLDOWN_FILE = path.join(dataDir, 'cooldown.json');
 const SIGNAL_TRACKING_FILE = path.join(dataDir, 'signal_tracking.json');
 let oilRunCounter = 0;
 
-// ========== ASSET CONFIGURATIONS ==========
+// ========== ASSET CONFIGURATIONS (unchanged) ==========
 const ASSET_CONFIGS = {
     eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0 },
     gbpusd: { multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex', minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.6, maxLot: 5.0 },
@@ -214,7 +213,7 @@ function getKeyLevels(candles, currentPrice) {
         levels.push({ price: Math.min(...weekCandles.map(c => c.low)), type: 'SUPPORT', strength: 'MAJOR', touches: 0, quality: 100 });
     }
     
-    // MINOR LEVELS WITH QUALITY (lowered threshold to 50)
+    // MINOR LEVELS WITH QUALITY (threshold 50)
     const levelMap = new Map();
     for (let i = 20; i < candles.length - 5; i++) {
         const isSwingHigh = candles[i].high > candles[i-2].high && candles[i].high > candles[i-1].high &&
@@ -230,7 +229,7 @@ function getKeyLevels(candles, currentPrice) {
                 if (Math.abs(candles[j].high - price) / price < 0.0003) touches++;
             }
             let quality = Math.min(90, 30 + (touches * 20));
-            if (!levelMap.has(rounded) && quality >= 50) {   // <--- lowered from 60 to 50
+            if (!levelMap.has(rounded) && quality >= 50) {
                 levelMap.set(rounded, { price, touches, quality, type: 'RESISTANCE' });
             }
         }
@@ -259,7 +258,7 @@ function getKeyLevels(candles, currentPrice) {
         });
     }
     
-    // ROUND NUMBERS (unchanged)
+    // ROUND NUMBERS
     const roundNumber = Math.round(currentPrice / 10) * 10;
     let roundTouches = 0;
     for (let i = Math.max(0, candles.length - 100); i < candles.length; i++) {
@@ -438,7 +437,7 @@ function detectCandlePattern(candles, bias) {
     return { detected: false, pattern: null };
 }
 
-// ========== SCORING SYSTEM (quality threshold now 50) ==========
+// ========== SCORING SYSTEM ==========
 function calculateSignalScore(factors) {
     let score = 0;
     let positionMultiplier = 1.0;
@@ -454,12 +453,11 @@ function calculateSignalScore(factors) {
         return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
     }
     
-    // Changed: require at least one of retrace OR sweep (instead of both)
+    // Require at least one of retrace OR sweep
     if (!hasRetrace && !hasSweep) {
         return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
     }
     
-    // Base score starts at 50 if at least one is true
     score = 50;
     
     if (levelStrength === 'MAJOR') {
@@ -479,7 +477,7 @@ function calculateSignalScore(factors) {
             score += 5;
             positionMultiplier = 0.75;
             expectedWinRate = 65;
-        } else if (levelQuality >= 50) {  // <-- lowered from 60 to 50
+        } else if (levelQuality >= 50) {
             score += 0;
             positionMultiplier = 0.6;
             expectedWinRate = 60;
@@ -496,7 +494,7 @@ function calculateSignalScore(factors) {
         }
     }
     
-    // Bonus for having BOTH retrace AND sweep
+    // Bonus for having both retrace AND sweep
     if (hasRetrace && hasSweep) {
         score += 10;
         expectedWinRate = Math.min(85, expectedWinRate + 5);
@@ -698,7 +696,7 @@ function calculateTradeLevels(price, bias, assetConfig, candles, positionMultipl
     };
 }
 
-// ========== SIGNAL ANALYSIS – SESSION FILTER REMOVED ==========
+// ========== SIGNAL ANALYSIS (session filter removed) ==========
 function analyzeSignal(prices, candles, assetConfig) {
     if (candles.length < 50) {
         return { bias: 'WAIT', confidence: 30, currentPrice: prices[prices.length-1] };
@@ -709,41 +707,31 @@ function analyzeSignal(prices, candles, assetConfig) {
     const atSupport = isAtSupport(curPrice, keyLevels);
     const atResistance = isAtResistance(curPrice, keyLevels);
     
-    // ========== SESSION FILTER REMOVED – trade 24/7 ==========
-    // No time restrictions
+    // No session filter – trade 24/7.
     
-    // Get level strength and quality
     let levelStrength = null;
     let levelQuality = 0;
     let levelPrice = null;
-    let levelType = null;
     
     if (atSupport.atLevel) {
         levelStrength = atSupport.strength;
         levelQuality = atSupport.quality || 100;
         levelPrice = atSupport.level;
-        levelType = 'SUPPORT';
     } else if (atResistance.atLevel) {
         levelStrength = atResistance.strength;
         levelQuality = atResistance.quality || 100;
         levelPrice = atResistance.level;
-        levelType = 'RESISTANCE';
     }
     
-    // Minor quality filter (lowered to 50)
+    // Minor quality filter (threshold 50)
     if (levelStrength === 'MINOR' && levelQuality < 50) {
-        return { 
-            bias: 'WAIT', 
-            grade: 'REJECT', 
-            currentPrice: curPrice, 
-            reasons: [`⏸️ MINOR level quality ${levelQuality} < 50`] 
-        };
+        return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: [`⏸️ MINOR level quality ${levelQuality} < 50`] };
     }
     
     const bos = detectBOS(candles);
     const fvg = detectFVG(candles);
     const ob = detectOrderBlock(candles);
-    const sessionBoost = getSessionMultiplier() >= 1.0; // still used for scoring
+    const sessionBoost = getSessionMultiplier() >= 1.0;
     
     let bias = null;
     let targetLevel = null;
@@ -772,7 +760,7 @@ function analyzeSignal(prices, candles, assetConfig) {
         candlePattern = detectCandlePattern(candles, 'SELL');
     }
     
-    // Require at least one of retrace OR sweep (already handled in scoring)
+    // At least one of retrace or sweep required
     if (!retraced && !sweep) {
         return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['⏸️ No retracement or sweep'] };
     }
@@ -827,7 +815,7 @@ function analyzeSignal(prices, candles, assetConfig) {
     };
 }
 
-// ========== TELEGRAM & CANDLE MANAGEMENT (unchanged) ==========
+// ========== TELEGRAM & CANDLE MANAGEMENT (FIXED PROCESS ASSET) ==========
 async function sendTelegramAlert(symbolDisplay, signal, tradeLevels, assetConfig) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
     if (isCooldownActive(symbolDisplay, signal.bias)) return false;
@@ -909,60 +897,73 @@ function saveCandleState(file, state) {
     fs.writeFileSync(f, JSON.stringify(state, null, 2));
 }
 
+// ========== FIXED PROCESS ASSET ==========
 async function processAsset(file, priceFetcher, displayName, assetConfig) {
     try {
         let price = await priceFetcher();
         if (!price) throw new Error('No price');
+        
         const now = Date.now();
-        const minute = Math.floor(now / 60000);
-        const bucket = Math.floor(minute / 5);
+        const fiveMinMs = 5 * 60 * 1000;
+        const bucketStart = Math.floor(now / fiveMinMs) * fiveMinMs;
+        
         let state = loadCandleState(file);
         let candles = loadCandleHistory(file);
-        if (!state || state.bucket !== bucket) {
+        
+        // If bucket changed, finalize previous candle
+        if (!state || state.bucketStart !== bucketStart) {
             if (state && state.candle && state.lastPrice) {
                 const completed = {
-                    timestamp: state.startTime,
+                    timestamp: state.bucketStart,
                     open: state.candle.open,
                     high: state.candle.high,
                     low: state.candle.low,
                     close: state.lastPrice
                 };
                 saveCandleToHistory(file, completed);
-                candles.push(completed);
-                if (candles.length >= 50) {
-                    const prices = candles.map(c => c.close);
-                    const signal = analyzeSignal(prices, candles, assetConfig);
-                    console.log(`📊 ${displayName} - ${signal.bias} | ${signal.grade} | ${signal.expectedWinRate || 0}% WR`);
-                    if (signal.bias !== 'WAIT' && signal.grade !== 'REJECT') {
-                        const tradeLevels = calculateTradeLevels(signal.currentPrice, signal.bias, assetConfig, candles, signal.positionMultiplier || 1.0);
-                        if (tradeLevels && parseFloat(tradeLevels.rrRatio) >= 2.0) {
-                            await sendTelegramAlert(displayName, signal, tradeLevels, assetConfig);
-                        }
-                    }
-                }
+                console.log(`📦 Completed candle for ${displayName}: ${completed.open} -> ${completed.close}`);
+                candles = loadCandleHistory(file); // refresh
             }
+            // Start new candle
             state = {
-                bucket: bucket,
-                startTime: now,
+                bucketStart: bucketStart,
                 candle: { open: price, high: price, low: price, close: price },
                 lastPrice: price,
                 lastTimestamp: now
             };
         } else {
+            // Update current candle
             state.candle.high = Math.max(state.candle.high, price);
             state.candle.low = Math.min(state.candle.low, price);
             state.candle.close = price;
             state.lastPrice = price;
+            state.lastTimestamp = now;
         }
         saveCandleState(file, state);
-        console.log(`✓ ${displayName}: ${price}`);
+        console.log(`✓ ${displayName}: price ${price} | bucket start ${new Date(bucketStart).toISOString()}`);
+        
+        // Analyze signals using current candle history
+        if (candles.length >= 50) {
+            const prices = candles.map(c => c.close);
+            const signal = analyzeSignal(prices, candles, assetConfig);
+            console.log(`📊 ${displayName} - ${signal.bias} | ${signal.grade} | ${signal.expectedWinRate || 0}% WR`);
+            if (signal.bias !== 'WAIT' && signal.grade !== 'REJECT') {
+                const tradeLevels = calculateTradeLevels(signal.currentPrice, signal.bias, assetConfig, candles, signal.positionMultiplier || 1.0);
+                if (tradeLevels && parseFloat(tradeLevels.rrRatio) >= 2.0) {
+                    await sendTelegramAlert(displayName, signal, tradeLevels, assetConfig);
+                }
+            }
+        } else {
+            console.log(`⏳ ${displayName}: building candles (${candles.length}/50)`);
+        }
+        
     } catch (err) {
         console.error(`✗ ${displayName}: ${err.message}`);
     }
 }
 
 async function main() {
-    console.log('--- OMNI-SIGNAL v6.2 (Session filter removed, minor quality 50, retrace OR sweep) ---');
+    console.log('--- OMNI-SIGNAL v6.3 (Fixed candle formation, 24/7, minor quality 50, retrace OR sweep) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
     console.log(`Rules: 24/7 trading | Minor quality >=50 | Retrace OR sweep required | BOS required`);
 
