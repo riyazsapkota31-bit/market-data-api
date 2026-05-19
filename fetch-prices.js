@@ -1,6 +1,6 @@
-// fetch-prices.js – SCALPING OPTIMIZED v6.4
-// CHANGES: Require BOTH retrace AND sweep | RR min 1.6, max 3.0 | Logical TP levels
-// All other features unchanged (candle formation, quality scoring, BOS, FVG, OB, MSS, patterns, etc.)
+// fetch-prices.js – SCALPING OPTIMIZED v6.5
+// ADDED: 9AM Killzone (New York Opening Range) strategy – runs in parallel with existing SMC logic.
+// All existing features (BOS, FVG, OB, MSS, patterns, scoring, RR 1.6-3.0, quality filters, etc.) remain untouched.
 
 const fs = require('fs');
 const path = require('path');
@@ -196,25 +196,22 @@ function getCurrentSession() {
     return 'OFF_HOURS';
 }
 
-// ========== KEY LEVEL DETECTION WITH QUALITY SCORING ==========
+// ========== KEY LEVEL DETECTION WITH QUALITY SCORING (unchanged) ==========
 function getKeyLevels(candles, currentPrice) {
     const levels = [];
     
-    // MAJOR LEVELS
     const dayCandles = candles.slice(-288);
     if (dayCandles.length > 0) {
         levels.push({ price: Math.max(...dayCandles.map(c => c.high)), type: 'RESISTANCE', strength: 'MAJOR', touches: 0, quality: 100 });
         levels.push({ price: Math.min(...dayCandles.map(c => c.low)), type: 'SUPPORT', strength: 'MAJOR', touches: 0, quality: 100 });
     }
     
-    // WEEKLY LEVELS
     if (candles.length >= 1440) {
         const weekCandles = candles.slice(-1440);
         levels.push({ price: Math.max(...weekCandles.map(c => c.high)), type: 'RESISTANCE', strength: 'MAJOR', touches: 0, quality: 100 });
         levels.push({ price: Math.min(...weekCandles.map(c => c.low)), type: 'SUPPORT', strength: 'MAJOR', touches: 0, quality: 100 });
     }
     
-    // MINOR LEVELS WITH QUALITY (threshold 50)
     const levelMap = new Map();
     for (let i = 20; i < candles.length - 5; i++) {
         const isSwingHigh = candles[i].high > candles[i-2].high && candles[i].high > candles[i-1].high &&
@@ -259,7 +256,6 @@ function getKeyLevels(candles, currentPrice) {
         });
     }
     
-    // ROUND NUMBERS
     const roundNumber = Math.round(currentPrice / 10) * 10;
     let roundTouches = 0;
     for (let i = Math.max(0, candles.length - 100); i < candles.length; i++) {
@@ -276,7 +272,6 @@ function getKeyLevels(candles, currentPrice) {
         });
     }
     
-    // Remove duplicates and sort by distance
     const unique = [];
     for (const level of levels) {
         let duplicate = false;
@@ -438,7 +433,7 @@ function detectCandlePattern(candles, bias) {
     return { detected: false, pattern: null };
 }
 
-// ========== SCORING SYSTEM ==========
+// ========== SCORING SYSTEM (unchanged) ==========
 function calculateSignalScore(factors) {
     let score = 0;
     let positionMultiplier = 1.0;
@@ -454,12 +449,11 @@ function calculateSignalScore(factors) {
         return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
     }
     
-    // NEW: require BOTH retrace AND sweep
     if (!hasRetrace || !hasSweep) {
         return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
     }
     
-    score = 60; // base increased because both are present
+    score = 60;
     
     if (levelStrength === 'MAJOR') {
         score += 25;
@@ -495,7 +489,6 @@ function calculateSignalScore(factors) {
         }
     }
     
-    // bonus for both is already built in, but we keep additional bonuses
     if (factors.mss && factors.mss.detected) {
         if (factors.mss.strength >= 80) {
             score += 12;
@@ -604,7 +597,6 @@ function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
     return finalStop;
 }
 
-// ========== MODIFIED RR RANGE 1.6 – 3.0 ==========
 function findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles) {
     const risk = Math.abs(entry - stopLoss);
     const minRR = 1.6;
@@ -706,7 +698,7 @@ function calculateTradeLevels(price, bias, assetConfig, candles, positionMultipl
     };
 }
 
-// ========== SIGNAL ANALYSIS (session filter removed, requires BOTH retrace AND sweep) ==========
+// ========== EXISTING SIGNAL ANALYSIS (unchanged) ==========
 function analyzeSignal(prices, candles, assetConfig) {
     if (candles.length < 50) {
         return { bias: 'WAIT', confidence: 30, currentPrice: prices[prices.length-1] };
@@ -716,8 +708,6 @@ function analyzeSignal(prices, candles, assetConfig) {
     const keyLevels = getKeyLevels(candles, curPrice);
     const atSupport = isAtSupport(curPrice, keyLevels);
     const atResistance = isAtResistance(curPrice, keyLevels);
-    
-    // No session filter – trade 24/7.
     
     let levelStrength = null;
     let levelQuality = 0;
@@ -733,7 +723,6 @@ function analyzeSignal(prices, candles, assetConfig) {
         levelPrice = atResistance.level;
     }
     
-    // Minor quality filter (threshold 50)
     if (levelStrength === 'MINOR' && levelQuality < 50) {
         return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: [`⏸️ MINOR level quality ${levelQuality} < 50`] };
     }
@@ -770,7 +759,6 @@ function analyzeSignal(prices, candles, assetConfig) {
         candlePattern = detectCandlePattern(candles, 'SELL');
     }
     
-    // MODIFIED: require BOTH retrace AND sweep
     if (!retraced || !sweep) {
         return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['⏸️ Need BOTH retracement AND liquidity sweep'] };
     }
@@ -825,7 +813,118 @@ function analyzeSignal(prices, candles, assetConfig) {
     };
 }
 
-// ========== TELEGRAM & CANDLE MANAGEMENT (FIXED PROCESS ASSET, unchanged) ==========
+// ======================= NEW: 9AM KILLZONE (NEW YORK OPENING RANGE) STRATEGY =======================
+// Runs in parallel with your existing strategy. Analyzes the 8am-9am ET window.
+// Generates signals when price false‑breaks the 8am range and then reverses on lower TF.
+
+function get8amRange(candles) {
+    // Find the 8:00 AM EST candle (using UTC-4). Assumes 5-minute candles.
+    for (let i = candles.length - 1; i >= 0; i--) {
+        const date = new Date(candles[i].timestamp);
+        const hourEST = date.getUTCHours() - 4; // EST = UTC-4 (without DST)
+        if (hourEST === 8 && date.getUTCMinutes() === 0) {
+            return { high: candles[i].high, low: candles[i].low, timestamp: candles[i].timestamp };
+        }
+    }
+    return null;
+}
+
+function detect9amFalseBreak(candles, eightAmRange) {
+    // Look at candles from 9:00 to 9:30 ET
+    const nineAmCandles = [];
+    for (let i = candles.length - 1; i >= 0; i--) {
+        const date = new Date(candles[i].timestamp);
+        const hourEST = date.getUTCHours() - 4;
+        if (hourEST === 9) {
+            nineAmCandles.unshift(candles[i]);
+        } else if (hourEST < 9) break;
+    }
+    if (nineAmCandles.length < 3) return null;
+
+    let breakHigh = false, breakLow = false;
+    let breakCandle = null;
+    for (let i = 0; i < nineAmCandles.length; i++) {
+        const c = nineAmCandles[i];
+        if (c.high > eightAmRange.high) {
+            breakHigh = true;
+            breakCandle = c;
+            break;
+        }
+        if (c.low < eightAmRange.low) {
+            breakLow = true;
+            breakCandle = c;
+            break;
+        }
+    }
+    if (!breakHigh && !breakLow) return null;
+
+    const breakIndex = nineAmCandles.findIndex(c => c === breakCandle);
+    const afterBreak = nineAmCandles.slice(breakIndex + 1, breakIndex + 4);
+    if (afterBreak.length < 2) return null;
+
+    if (breakHigh) {
+        // Bullish trap: broke above, then closed back below the high
+        const closedBelow = afterBreak.some(c => c.close < eightAmRange.high);
+        const lowerTFReversal = afterBreak[afterBreak.length-1].close < afterBreak[0].close;
+        if (closedBelow && lowerTFReversal) {
+            return { bias: 'SELL', level: eightAmRange.high, reason: 'False break above 8am high' };
+        }
+    } else if (breakLow) {
+        const closedAbove = afterBreak.some(c => c.close > eightAmRange.low);
+        const lowerTFReversal = afterBreak[afterBreak.length-1].close > afterBreak[0].close;
+        if (closedAbove && lowerTFReversal) {
+            return { bias: 'BUY', level: eightAmRange.low, reason: 'False break below 8am low' };
+        }
+    }
+    return null;
+}
+
+function analyze9amStrategy(candles, assetConfig, currentPrice) {
+    // Only consider signals after 9:30 AM ET and before 4 PM ET
+    const nowEST = new Date();
+    const hourEST = nowEST.getUTCHours() - 4;
+    const minuteEST = nowEST.getUTCMinutes();
+    if (hourEST < 9 || (hourEST === 9 && minuteEST < 30) || hourEST > 16) return null;
+
+    const eightAmRange = get8amRange(candles);
+    if (!eightAmRange) return null;
+
+    const falseBreak = detect9amFalseBreak(candles, eightAmRange);
+    if (!falseBreak) return null;
+
+    // Build trade levels using your existing risk management (same as other signals)
+    const stopLoss = findLogicalStopLoss(candles, currentPrice, falseBreak.bias, assetConfig);
+    const risk = Math.abs(currentPrice - stopLoss);
+    const { takeProfit, rr, isExtended } = findLogicalTakeProfit(currentPrice, stopLoss, falseBreak.bias, assetConfig, candles);
+    
+    const riskAmount = DEFAULT_BALANCE * (DEFAULT_RISK_PERCENT / 100);
+    const stopDistPoints = Math.abs(currentPrice - stopLoss) + assetConfig.spread;
+    let lotSize = riskAmount / (stopDistPoints * assetConfig.multiplier);
+    lotSize = Math.floor(lotSize * 1000) / 1000;
+    lotSize = Math.max(0.01, Math.min(lotSize, assetConfig.maxLot));
+    
+    return {
+        bias: falseBreak.bias,
+        grade: 'A',                     // fixed grade for this strategy (can be adjusted)
+        expectedWinRate: 70,            // default expected win rate
+        positionMultiplier: 1.0,
+        entry: currentPrice.toFixed(assetConfig.digits),
+        stopLoss: stopLoss.toFixed(assetConfig.digits),
+        takeProfit: takeProfit.toFixed(assetConfig.digits),
+        rrRatio: rr,
+        lotSize: lotSize.toFixed(2),
+        strategy: '9amKillzone',
+        reasons: [
+            `${falseBreak.bias === 'BUY' ? '🟢' : '🔴'} 9AM Killzone Setup`,
+            falseBreak.reason,
+            `8am range: H=${eightAmRange.high.toFixed(assetConfig.digits)} L=${eightAmRange.low.toFixed(assetConfig.digits)}`,
+            `Lower timeframe reversal confirmed`,
+            `Risk/Reward: ${rr}`
+        ]
+    };
+}
+
+// ========== TELEGRAM & CANDLE MANAGEMENT (UPDATED PROCESS ASSET TO RUN BOTH STRATEGIES) ==========
 async function sendTelegramAlert(symbolDisplay, signal, tradeLevels, assetConfig) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
     if (isCooldownActive(symbolDisplay, signal.bias)) return false;
@@ -833,8 +932,9 @@ async function sendTelegramAlert(symbolDisplay, signal, tradeLevels, assetConfig
     const session = getCurrentSession();
     const timestamp = new Date().toLocaleString();
     const rrDisplay = tradeLevels.isExtendedRR ? `1:${tradeLevels.rrRatio} 🚀 EXTENDED` : `1:${tradeLevels.rrRatio}`;
+    const strategyTag = signal.strategy ? ` [${signal.strategy}]` : '';
     const message = `
-🤖 OMNI-SIGNAL ALERT 🤖
+🤖 OMNI-SIGNAL ALERT${strategyTag} 🤖
 ━━━━━━━━━━━━━━━━━━━
 ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.grade} (${signal.expectedWinRate}% WR expected)
 ⏰ ${timestamp} (${session})
@@ -863,7 +963,7 @@ ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.grade} (${signal.
         });
         const json = await res.json();
         if (json.ok) {
-            console.log(`✅ ${symbolDisplay} ${signal.grade} | RR:${tradeLevels.rrRatio} | ${signal.expectedWinRate}% WR`);
+            console.log(`✅ ${symbolDisplay} ${signal.grade} | RR:${tradeLevels.rrRatio} | ${signal.expectedWinRate}% WR${strategyTag}`);
             setCooldown(symbolDisplay, signal.bias);
             return true;
         }
@@ -907,7 +1007,7 @@ function saveCandleState(file, state) {
     fs.writeFileSync(f, JSON.stringify(state, null, 2));
 }
 
-// ========== FIXED PROCESS ASSET (unchanged) ==========
+// ========== FIXED PROCESS ASSET (now runs both strategies) ==========
 async function processAsset(file, priceFetcher, displayName, assetConfig) {
     try {
         let price = await priceFetcher();
@@ -920,7 +1020,6 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
         let state = loadCandleState(file);
         let candles = loadCandleHistory(file);
         
-        // If bucket changed, finalize previous candle
         if (!state || state.bucketStart !== bucketStart) {
             if (state && state.candle && state.lastPrice) {
                 const completed = {
@@ -932,9 +1031,8 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
                 };
                 saveCandleToHistory(file, completed);
                 console.log(`📦 Completed candle for ${displayName}: ${completed.open} -> ${completed.close}`);
-                candles = loadCandleHistory(file); // refresh
+                candles = loadCandleHistory(file);
             }
-            // Start new candle
             state = {
                 bucketStart: bucketStart,
                 candle: { open: price, high: price, low: price, close: price },
@@ -942,7 +1040,6 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
                 lastTimestamp: now
             };
         } else {
-            // Update current candle
             state.candle.high = Math.max(state.candle.high, price);
             state.candle.low = Math.min(state.candle.low, price);
             state.candle.close = price;
@@ -952,15 +1049,32 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
         saveCandleState(file, state);
         console.log(`✓ ${displayName}: price ${price} | bucket start ${new Date(bucketStart).toISOString()}`);
         
-        // Analyze signals using current candle history
         if (candles.length >= 50) {
             const prices = candles.map(c => c.close);
-            const signal = analyzeSignal(prices, candles, assetConfig);
-            console.log(`📊 ${displayName} - ${signal.bias} | ${signal.grade} | ${signal.expectedWinRate || 0}% WR`);
-            if (signal.bias !== 'WAIT' && signal.grade !== 'REJECT') {
-                const tradeLevels = calculateTradeLevels(signal.currentPrice, signal.bias, assetConfig, candles, signal.positionMultiplier || 1.0);
+            
+            // 1. Run existing strategy
+            const existingSignal = analyzeSignal(prices, candles, assetConfig);
+            
+            // 2. Run new 9am strategy
+            const killzoneSignal = analyze9amStrategy(candles, assetConfig, price);
+            
+            // 3. Decide which signal to send (prioritise higher expected win rate)
+            let finalSignal = null;
+            if (existingSignal.bias !== 'WAIT' && killzoneSignal) {
+                const existingWR = existingSignal.expectedWinRate || 0;
+                const killzoneWR = killzoneSignal.expectedWinRate || 0;
+                finalSignal = existingWR >= killzoneWR ? existingSignal : killzoneSignal;
+                console.log(`🤝 Confluence: Both strategies signaled. Using ${finalSignal === existingSignal ? 'existing' : '9am'} (WR ${Math.max(existingWR, killzoneWR)}%)`);
+            } else if (existingSignal.bias !== 'WAIT') {
+                finalSignal = existingSignal;
+            } else if (killzoneSignal) {
+                finalSignal = killzoneSignal;
+            }
+            
+            if (finalSignal && finalSignal.bias !== 'WAIT' && finalSignal.grade !== 'REJECT') {
+                const tradeLevels = calculateTradeLevels(finalSignal.currentPrice, finalSignal.bias, assetConfig, candles, finalSignal.positionMultiplier || 1.0);
                 if (tradeLevels && parseFloat(tradeLevels.rrRatio) >= 1.6) {
-                    await sendTelegramAlert(displayName, signal, tradeLevels, assetConfig);
+                    await sendTelegramAlert(displayName, finalSignal, tradeLevels, assetConfig);
                 }
             }
         } else {
@@ -973,9 +1087,9 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
 }
 
 async function main() {
-    console.log('--- OMNI-SIGNAL v6.4 (Both retrace+sweep required, RR 1.6-3.0, logical TP) ---');
+    console.log('--- OMNI-SIGNAL v6.5 (Both retrace+sweep required, RR 1.6-3.0, + 9AM Killzone parallel strategy) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
-    console.log(`Rules: 24/7 trading | Minor quality >=50 | BOTH retrace AND sweep required | RR 1.6-3.0`);
+    console.log(`Rules: 24/7 trading | Minor quality >=50 | BOTH retrace AND sweep required | RR 1.6-3.0 | 9AM Killzone active`);
 
     let eurusd, gbpusd, usdjpy, usdcad, usdchf, usdsek;
     try {
