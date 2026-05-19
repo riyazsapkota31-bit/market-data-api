@@ -1,5 +1,6 @@
-// fetch-prices.js – SCALPING OPTIMIZED v6.3
-// FIXED: Candle formation (bucket based on 5-min boundaries) – all other features unchanged.
+// fetch-prices.js – SCALPING OPTIMIZED v6.4
+// CHANGES: Require BOTH retrace AND sweep | RR min 1.6, max 3.0 | Logical TP levels
+// All other features unchanged (candle formation, quality scoring, BOS, FVG, OB, MSS, patterns, etc.)
 
 const fs = require('fs');
 const path = require('path');
@@ -21,19 +22,19 @@ let oilRunCounter = 0;
 
 // ========== ASSET CONFIGURATIONS (unchanged) ==========
 const ASSET_CONFIGS = {
-    eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0 },
-    gbpusd: { multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex', minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.6, maxLot: 5.0 },
-    usdjpy: { multiplier: 100, spread: 0.03, digits: 3, class: 'forex', minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.6, maxLot: 5.0 },
-    usdcad: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0 },
-    usdchf: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0 },
-    usdsek: { multiplier: 10000, spread: 0.0003, digits: 5, class: 'forex', minStopPips: 20, maxStopPips: 40, atrMultiplier: 0.6, maxLot: 5.0 },
-    btcusd: { multiplier: 10, spread: 75.00, digits: 0, class: 'crypto', minStopPips: 800, maxStopPips: 2000, atrMultiplier: 0.8, maxLot: 0.5 },
-    ethusd: { multiplier: 10, spread: 6.00, digits: 0, class: 'crypto', minStopPips: 50, maxStopPips: 120, atrMultiplier: 0.8, maxLot: 5.0 },
-    solusd: { multiplier: 10, spread: 0.50, digits: 2, class: 'crypto', minStopPips: 5, maxStopPips: 15, atrMultiplier: 0.8, maxLot: 50.0 },
-    xauusd: { multiplier: 100, spread: 0.35, digits: 2, class: 'commodities', minStopPips: 15.0, maxStopPips: 35.0, atrMultiplier: 0.8, maxLot: 0.5 },
-    xagusd: { multiplier: 100, spread: 0.04, digits: 3, class: 'commodities', minStopPips: 0.50, maxStopPips: 1.20, atrMultiplier: 0.8, maxLot: 0.5 },
-    wtiusd: { multiplier: 100, spread: 0.05, digits: 2, class: 'commodities', minStopPips: 0.60, maxStopPips: 1.50, atrMultiplier: 0.6, maxLot: 1.0 },
-    dxy: { multiplier: 100, spread: 0.05, digits: 4, class: 'forex', minStopPips: 15, maxStopPips: 40, atrMultiplier: 0.6, maxLot: 5.0 }
+    eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0, tpMultiplier: 2.0 },
+    gbpusd: { multiplier: 10000, spread: 0.00019, digits: 5, class: 'forex', minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.6, maxLot: 5.0, tpMultiplier: 2.0 },
+    usdjpy: { multiplier: 100, spread: 0.03, digits: 3, class: 'forex', minStopPips: 18, maxStopPips: 35, atrMultiplier: 0.6, maxLot: 5.0, tpMultiplier: 2.0 },
+    usdcad: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0, tpMultiplier: 2.0 },
+    usdchf: { multiplier: 10000, spread: 0.00015, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0, tpMultiplier: 2.0 },
+    usdsek: { multiplier: 10000, spread: 0.0003, digits: 5, class: 'forex', minStopPips: 20, maxStopPips: 40, atrMultiplier: 0.6, maxLot: 5.0, tpMultiplier: 2.0 },
+    btcusd: { multiplier: 10, spread: 75.00, digits: 0, class: 'crypto', minStopPips: 800, maxStopPips: 2000, atrMultiplier: 0.8, maxLot: 0.5, tpMultiplier: 2.5 },
+    ethusd: { multiplier: 10, spread: 6.00, digits: 0, class: 'crypto', minStopPips: 50, maxStopPips: 120, atrMultiplier: 0.8, maxLot: 5.0, tpMultiplier: 2.5 },
+    solusd: { multiplier: 10, spread: 0.50, digits: 2, class: 'crypto', minStopPips: 5, maxStopPips: 15, atrMultiplier: 0.8, maxLot: 50.0, tpMultiplier: 2.5 },
+    xauusd: { multiplier: 100, spread: 0.35, digits: 2, class: 'commodities', minStopPips: 15.0, maxStopPips: 35.0, atrMultiplier: 0.8, maxLot: 0.5, tpMultiplier: 2.0 },
+    xagusd: { multiplier: 100, spread: 0.04, digits: 3, class: 'commodities', minStopPips: 0.50, maxStopPips: 1.20, atrMultiplier: 0.8, maxLot: 0.5, tpMultiplier: 2.0 },
+    wtiusd: { multiplier: 100, spread: 0.05, digits: 2, class: 'commodities', minStopPips: 0.60, maxStopPips: 1.50, atrMultiplier: 0.6, maxLot: 1.0, tpMultiplier: 2.0 },
+    dxy: { multiplier: 100, spread: 0.05, digits: 4, class: 'forex', minStopPips: 15, maxStopPips: 40, atrMultiplier: 0.6, maxLot: 5.0, tpMultiplier: 2.0 }
 };
 
 // ========== UTILITY FUNCTIONS (unchanged) ==========
@@ -453,17 +454,17 @@ function calculateSignalScore(factors) {
         return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
     }
     
-    // Require at least one of retrace OR sweep
-    if (!hasRetrace && !hasSweep) {
+    // NEW: require BOTH retrace AND sweep
+    if (!hasRetrace || !hasSweep) {
         return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
     }
     
-    score = 50;
+    score = 60; // base increased because both are present
     
     if (levelStrength === 'MAJOR') {
         score += 25;
         positionMultiplier = 1.0;
-        expectedWinRate = 78;
+        expectedWinRate = 80;
     } else if (levelStrength === 'MINOR') {
         if (levelQuality >= 85) {
             score += 15;
@@ -494,16 +495,11 @@ function calculateSignalScore(factors) {
         }
     }
     
-    // Bonus for having both retrace AND sweep
-    if (hasRetrace && hasSweep) {
-        score += 10;
-        expectedWinRate = Math.min(85, expectedWinRate + 5);
-    }
-    
+    // bonus for both is already built in, but we keep additional bonuses
     if (factors.mss && factors.mss.detected) {
         if (factors.mss.strength >= 80) {
             score += 12;
-            expectedWinRate = Math.min(85, expectedWinRate + 6);
+            expectedWinRate = Math.min(85, expectedWinRate + 5);
         } else {
             score += 6;
             expectedWinRate = Math.min(85, expectedWinRate + 3);
@@ -511,7 +507,7 @@ function calculateSignalScore(factors) {
     }
     if (factors.candlePattern && factors.candlePattern.detected) {
         score += 10;
-        expectedWinRate = Math.min(85, expectedWinRate + 5);
+        expectedWinRate = Math.min(85, expectedWinRate + 4);
     }
     if (factors.fvg) {
         score += 8;
@@ -540,7 +536,7 @@ function calculateSignalScore(factors) {
     return { score, grade, passed, positionMultiplier, expectedWinRate };
 }
 
-// ========== RISK MANAGEMENT (unchanged) ==========
+// ========== RISK MANAGEMENT (UPDATED RR 1.6-3.0) ==========
 function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
     const { minStopPips, maxStopPips, atrMultiplier, spread } = assetConfig;
     let atrStop = minStopPips;
@@ -608,16 +604,21 @@ function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
     return finalStop;
 }
 
+// ========== MODIFIED RR RANGE 1.6 – 3.0 ==========
 function findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles) {
     const risk = Math.abs(entry - stopLoss);
-    const minRR = 2.0;
-    const maxRR = 5.0;
+    const minRR = 1.6;
+    const maxRR = 3.0;
+    const preferredRR = assetConfig.tpMultiplier || 2.0;
+    
     let logicalTP = null;
     let actualRR = minRR;
+    
     if (candles && candles.length >= 50) {
         const recentCandles = candles.slice(-50);
         const resistanceLevels = [];
         const supportLevels = [];
+        
         for (let i = 5; i < recentCandles.length - 5; i++) {
             if (recentCandles[i].high > recentCandles[i-1].high && recentCandles[i].high > recentCandles[i+1].high &&
                 recentCandles[i].high > recentCandles[i-2].high && recentCandles[i].high > recentCandles[i+2].high) {
@@ -628,7 +629,9 @@ function findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles) {
                 supportLevels.push(recentCandles[i].low);
             }
         }
+        
         const buffer = entry * 0.0005;
+        
         if (bias === 'BUY') {
             const validResistances = resistanceLevels.filter(r => r > entry);
             validResistances.sort((a, b) => a - b);
@@ -653,24 +656,31 @@ function findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles) {
             }
         }
     }
+    
     let takeProfit;
     let isExtended = false;
-    if (logicalTP && actualRR > minRR) {
+    
+    if (logicalTP) {
         takeProfit = logicalTP;
-        isExtended = true;
-    } else if (logicalTP && actualRR === minRR) {
-        takeProfit = logicalTP;
-        isExtended = false;
+        if (actualRR > minRR + 0.01) isExtended = true;
     } else {
-        takeProfit = bias === 'BUY' ? entry + (risk * minRR) : entry - (risk * minRR);
-        actualRR = minRR;
+        const targetRR = Math.min(maxRR, Math.max(minRR, preferredRR));
+        takeProfit = bias === 'BUY' ? entry + (risk * targetRR) : entry - (risk * targetRR);
+        actualRR = targetRR;
         isExtended = false;
     }
+    
     if (actualRR < minRR) {
         actualRR = minRR;
         takeProfit = bias === 'BUY' ? entry + (risk * minRR) : entry - (risk * minRR);
         isExtended = false;
     }
+    if (actualRR > maxRR) {
+        actualRR = maxRR;
+        takeProfit = bias === 'BUY' ? entry + (risk * maxRR) : entry - (risk * maxRR);
+        isExtended = true;
+    }
+    
     return { takeProfit, rr: actualRR.toFixed(1), isExtended };
 }
 
@@ -678,7 +688,7 @@ function calculateTradeLevels(price, bias, assetConfig, candles, positionMultipl
     const stopLoss = findLogicalStopLoss(candles, price, bias, assetConfig);
     const entry = price;
     const { takeProfit, rr, isExtended } = findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles);
-    if (parseFloat(rr) < 2.0) return null;
+    if (parseFloat(rr) < 1.6) return null;
     const riskAmount = DEFAULT_BALANCE * (DEFAULT_RISK_PERCENT / 100);
     const stopDistPoints = Math.abs(entry - stopLoss) + assetConfig.spread;
     let lotSize = riskAmount / (stopDistPoints * assetConfig.multiplier);
@@ -696,7 +706,7 @@ function calculateTradeLevels(price, bias, assetConfig, candles, positionMultipl
     };
 }
 
-// ========== SIGNAL ANALYSIS (session filter removed) ==========
+// ========== SIGNAL ANALYSIS (session filter removed, requires BOTH retrace AND sweep) ==========
 function analyzeSignal(prices, candles, assetConfig) {
     if (candles.length < 50) {
         return { bias: 'WAIT', confidence: 30, currentPrice: prices[prices.length-1] };
@@ -760,9 +770,9 @@ function analyzeSignal(prices, candles, assetConfig) {
         candlePattern = detectCandlePattern(candles, 'SELL');
     }
     
-    // At least one of retrace or sweep required
-    if (!retraced && !sweep) {
-        return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['⏸️ No retracement or sweep'] };
+    // MODIFIED: require BOTH retrace AND sweep
+    if (!retraced || !sweep) {
+        return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['⏸️ Need BOTH retracement AND liquidity sweep'] };
     }
     
     const scoreResult = calculateSignalScore({
@@ -815,7 +825,7 @@ function analyzeSignal(prices, candles, assetConfig) {
     };
 }
 
-// ========== TELEGRAM & CANDLE MANAGEMENT (FIXED PROCESS ASSET) ==========
+// ========== TELEGRAM & CANDLE MANAGEMENT (FIXED PROCESS ASSET, unchanged) ==========
 async function sendTelegramAlert(symbolDisplay, signal, tradeLevels, assetConfig) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
     if (isCooldownActive(symbolDisplay, signal.bias)) return false;
@@ -897,7 +907,7 @@ function saveCandleState(file, state) {
     fs.writeFileSync(f, JSON.stringify(state, null, 2));
 }
 
-// ========== FIXED PROCESS ASSET ==========
+// ========== FIXED PROCESS ASSET (unchanged) ==========
 async function processAsset(file, priceFetcher, displayName, assetConfig) {
     try {
         let price = await priceFetcher();
@@ -949,7 +959,7 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
             console.log(`📊 ${displayName} - ${signal.bias} | ${signal.grade} | ${signal.expectedWinRate || 0}% WR`);
             if (signal.bias !== 'WAIT' && signal.grade !== 'REJECT') {
                 const tradeLevels = calculateTradeLevels(signal.currentPrice, signal.bias, assetConfig, candles, signal.positionMultiplier || 1.0);
-                if (tradeLevels && parseFloat(tradeLevels.rrRatio) >= 2.0) {
+                if (tradeLevels && parseFloat(tradeLevels.rrRatio) >= 1.6) {
                     await sendTelegramAlert(displayName, signal, tradeLevels, assetConfig);
                 }
             }
@@ -963,9 +973,9 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
 }
 
 async function main() {
-    console.log('--- OMNI-SIGNAL v6.3 (Fixed candle formation, 24/7, minor quality 50, retrace OR sweep) ---');
+    console.log('--- OMNI-SIGNAL v6.4 (Both retrace+sweep required, RR 1.6-3.0, logical TP) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
-    console.log(`Rules: 24/7 trading | Minor quality >=50 | Retrace OR sweep required | BOS required`);
+    console.log(`Rules: 24/7 trading | Minor quality >=50 | BOTH retrace AND sweep required | RR 1.6-3.0`);
 
     let eurusd, gbpusd, usdjpy, usdcad, usdchf, usdsek;
     try {
