@@ -1,4 +1,4 @@
-// fetch-prices.js – v9.0 (Added Double Sweep, Trendline, Scaled RSI, Three-Drive, Head & Shoulders)
+// fetch-prices.js – v9.1 (Added directional alignment: sweep + FVG/OB must match trade direction)
 
 const fs = require('fs');
 const path = require('path');
@@ -218,7 +218,7 @@ function isAtResistance(price, levels) {
     return { atLevel: false };
 }
 
-// ========== INSTITUTIONAL FOOTPRINTS (existing) ==========
+// ========== INSTITUTIONAL FOOTPRINTS ==========
 function detectBOS(candles) {
     if (candles.length < 50) return null;
     const highs = candles.map(c => c.high);
@@ -263,14 +263,20 @@ function checkRetracement(candles, level) {
     }
     return false;
 }
-function detectLiquiditySweep(candles, level) {
-    if (candles.length < 5) return false;
+function detectLiquiditySweep(candles, level, bias) {
+    if (candles.length < 5) return { detected: false, direction: null };
     const recent = candles.slice(-5);
     for (const c of recent) {
-        if (c.low < level && c.close > level && c.close > c.open) return true;
-        if (c.high > level && c.close < level && c.close < c.open) return true;
+        // Bullish sweep: price swept below level, closed above it
+        if (c.low < level && c.close > level && c.close > c.open) {
+            return { detected: true, direction: 'BULLISH' };
+        }
+        // Bearish sweep: price swept above level, closed below it
+        if (c.high > level && c.close < level && c.close < c.open) {
+            return { detected: true, direction: 'BEARISH' };
+        }
     }
-    return false;
+    return { detected: false, direction: null };
 }
 function detectMSS(candles, bias) {
     if (candles.length < 20) return { detected: false, strength: 0 };
@@ -320,7 +326,6 @@ function detectCandlePattern(candles, bias) {
 
 // ========== NEW PATTERN DETECTIONS ==========
 
-// 1. DOUBLE SWEEP
 function detectDoubleSweep(candles) {
     if (candles.length < 30) return false;
     const recentHighs = [];
@@ -339,7 +344,6 @@ function detectDoubleSweep(candles) {
     return sweepCount >= 2;
 }
 
-// 2. TRENDLINE BREAKOUT + RETEST (simplified: uses last 5 swing points)
 function detectTrendlineBreakRetest(candles) {
     if (candles.length < 20) return { detected: false, direction: null };
     const swingPoints = [];
@@ -366,7 +370,6 @@ function detectTrendlineBreakRetest(candles) {
     return { detected: false, direction: null };
 }
 
-// 3. SCALED RSI DIVERGENCE (strong vs weak)
 function detectScaledRSIDivergence(prices, rsi) {
     if (prices.length < 20) return { direction: null, strength: 0 };
     const recentPrices = prices.slice(-20);
@@ -399,7 +402,6 @@ function detectScaledRSIDivergence(prices, rsi) {
     return { direction, strength };
 }
 
-// 4. THREE-DRIVE (TRIPLE CROWN) – zigzag with middle push biggest
 function detectThreeDrive(candles) {
     if (candles.length < 30) return { detected: false, direction: null };
     const swingPoints = [];
@@ -431,7 +433,6 @@ function detectThreeDrive(candles) {
     return { detected: false, direction: null };
 }
 
-// 5. HEAD AND SHOULDERS
 function detectHeadAndShoulders(candles) {
     if (candles.length < 30) return { detected: false, direction: null, neckline: null };
     const swingPoints = [];
@@ -477,12 +478,30 @@ function detectHeadAndShoulders(candles) {
     return { detected: false, direction: null, neckline: null };
 }
 
-// ========== SCORING SYSTEM (with new pattern bonuses) ==========
+// ========== SCORING SYSTEM (with directional alignment) ==========
 function calculateSignalScore(factors) {
-    const { hasBOS, hasKeyLevel, retraced, sweep, levelStrength, levelQuality, mss, candlePattern, fvg, ob, sessionBoost,
-            doubleSweep, trendlineBreak, scaledRSIStrength, threeDrive, headShoulders } = factors;
+    const { hasBOS, hasKeyLevel, retraced, sweepDetected, sweepDirection, levelStrength, levelQuality, mss, candlePattern, fvg, ob, sessionBoost,
+            doubleSweep, trendlineBreak, scaledRSIStrength, threeDrive, headShoulders, tradeDirection } = factors;
+    
     if (!hasBOS || !hasKeyLevel) return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
-    if (!retraced || !sweep) return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
+    if (!retraced) return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
+    
+    // DIRECTIONAL ALIGNMENT CHECKS (NEW)
+    // Sweep direction must match trade direction
+    if (sweepDetected && sweepDirection !== tradeDirection) {
+        return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35, reason: 'Sweep direction opposes trade' };
+    }
+    // FVG/OB direction must match trade direction
+    if (fvg && fvg.type !== tradeDirection) {
+        return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35, reason: 'FVG direction opposes trade' };
+    }
+    if (ob && ob.type !== tradeDirection) {
+        return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35, reason: 'OB direction opposes trade' };
+    }
+    // BOS direction must match trade direction
+    if (hasBOS && factors.bosDirection !== tradeDirection) {
+        return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35, reason: 'BOS direction opposes trade' };
+    }
 
     let score = 60;
     let positionMultiplier = 1.0;
@@ -503,8 +522,6 @@ function calculateSignalScore(factors) {
 
     if (mss && mss.detected) { score += (mss.strength >= 80 ? 12 : 6); expectedWinRate = Math.min(85, expectedWinRate + (mss.strength >= 80 ? 5 : 3)); }
     if (candlePattern && candlePattern.detected) { score += 10; expectedWinRate = Math.min(85, expectedWinRate + 4); }
-    if (fvg) { score += 8; expectedWinRate = Math.min(85, expectedWinRate + 3); }
-    if (ob) { score += 5; expectedWinRate = Math.min(85, expectedWinRate + 2); }
     if (sessionBoost && (levelStrength === 'MAJOR' || levelQuality >= 75)) { score += 5; expectedWinRate = Math.min(85, expectedWinRate + 2); }
 
     // NEW PATTERN BONUSES
@@ -526,7 +543,7 @@ function calculateSignalScore(factors) {
     return { score, grade, passed, positionMultiplier, expectedWinRate };
 }
 
-// ========== RISK MANAGEMENT (unchanged, single TP) ==========
+// ========== RISK MANAGEMENT (unchanged) ==========
 function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
     const { minStopPips, maxStopPips, atrMultiplier, spread } = assetConfig;
     let atrStop = minStopPips;
@@ -638,7 +655,7 @@ function calculateTradeLevels(price, bias, assetConfig, candles, positionMultipl
     return { entry: entry.toFixed(assetConfig.digits), sl: stopLoss.toFixed(assetConfig.digits), tp: takeProfit.toFixed(assetConfig.digits), rrRatio: rr, lotSize: lotSize.toFixed(2), isExtendedRR: isExtended };
 }
 
-// ========== MAIN SIGNAL ANALYSIS (integrates all new patterns) ==========
+// ========== MAIN SIGNAL ANALYSIS (with directional alignment) ==========
 function analyzeSignal(prices, candles, assetConfig) {
     if (candles.length < 50) return { bias: 'WAIT', confidence: 30, currentPrice: prices[prices.length-1] };
     const curPrice = prices[prices.length-1];
@@ -649,24 +666,40 @@ function analyzeSignal(prices, candles, assetConfig) {
     if (atSupport.atLevel) { levelStrength = atSupport.strength; levelQuality = atSupport.quality || 100; levelPrice = atSupport.level; }
     else if (atResistance.atLevel) { levelStrength = atResistance.strength; levelQuality = atResistance.quality || 100; levelPrice = atResistance.level; }
     if (levelStrength === 'MINOR' && levelQuality < 70) return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: [`⏸️ MINOR level quality ${levelQuality} < 70`] };
+    
     const bos = detectBOS(candles);
     const fvg = detectFVG(candles);
     const ob = detectOrderBlock(candles);
     const sessionBoost = getSessionMultiplier() >= 1.0;
-    let bias = null, targetLevel = null, retraced = false, sweep = false, mss = { detected: false }, candlePattern = { detected: false };
+    
+    let bias = null, targetLevel = null, retraced = false, sweepResult = { detected: false, direction: null }, mss = { detected: false }, candlePattern = { detected: false };
+    
     if (atSupport.atLevel) {
         bias = 'BUY';
         targetLevel = fvg ? (fvg.type === 'BULLISH' ? fvg.level2 : fvg.level) : (ob ? ob.level : null);
-        if (targetLevel) { retraced = checkRetracement(candles, targetLevel); sweep = detectLiquiditySweep(candles, targetLevel); }
-        mss = detectMSS(candles, 'BUY'); candlePattern = detectCandlePattern(candles, 'BUY');
+        if (targetLevel) { 
+            retraced = checkRetracement(candles, targetLevel); 
+            sweepResult = detectLiquiditySweep(candles, targetLevel, bias);
+        }
+        mss = detectMSS(candles, 'BUY'); 
+        candlePattern = detectCandlePattern(candles, 'BUY');
     } else if (atResistance.atLevel) {
         bias = 'SELL';
         targetLevel = fvg ? (fvg.type === 'BEARISH' ? fvg.level : fvg.level2) : (ob ? ob.level : null);
-        if (targetLevel) { retraced = checkRetracement(candles, targetLevel); sweep = detectLiquiditySweep(candles, targetLevel); }
-        mss = detectMSS(candles, 'SELL'); candlePattern = detectCandlePattern(candles, 'SELL');
+        if (targetLevel) { 
+            retraced = checkRetracement(candles, targetLevel); 
+            sweepResult = detectLiquiditySweep(candles, targetLevel, bias);
+        }
+        mss = detectMSS(candles, 'SELL'); 
+        candlePattern = detectCandlePattern(candles, 'SELL');
     }
     if (!bias) return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['⏸️ No clear level'] };
-
+    
+    // If sweep required but not detected
+    if (!sweepResult.detected) {
+        return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['⏸️ No liquidity sweep'] };
+    }
+    
     // DETECT NEW PATTERNS
     const doubleSweep = detectDoubleSweep(candles);
     const trendlineBreak = detectTrendlineBreakRetest(candles).detected;
@@ -676,17 +709,34 @@ function analyzeSignal(prices, candles, assetConfig) {
 
     const scoreResult = calculateSignalScore({
         hasBOS: !!(bos && ((bias === 'BUY' && bos.type === 'BULLISH') || (bias === 'SELL' && bos.type === 'BEARISH'))),
-        hasKeyLevel: true, retraced, sweep, levelStrength, levelQuality, mss, candlePattern, fvg: !!fvg, ob: !!ob, sessionBoost,
-        doubleSweep, trendlineBreak, scaledRSIStrength: scaledRSI.strength, threeDrive, headShoulders
+        bosDirection: bos ? (bos.type === 'BULLISH' ? 'BUY' : 'SELL') : null,
+        hasKeyLevel: true, 
+        retraced, 
+        sweepDetected: sweepResult.detected,
+        sweepDirection: sweepResult.direction,
+        levelStrength, levelQuality, 
+        mss, candlePattern, 
+        fvg: fvg ? { type: fvg.type === 'BULLISH' ? 'BUY' : 'SELL' } : null,
+        ob: ob ? { type: ob.type === 'BULLISH' ? 'BUY' : 'SELL' } : null,
+        sessionBoost,
+        doubleSweep, trendlineBreak, 
+        scaledRSIStrength: scaledRSI.strength, 
+        threeDrive, headShoulders,
+        tradeDirection: bias
     });
-    if (!scoreResult.passed) return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['❌ Signal rejected'] };
+    
+    if (!scoreResult.passed) {
+        let reason = scoreResult.reason || '❌ Signal rejected';
+        return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: [reason] };
+    }
+    
     let reasons = [];
     reasons.push(`${bias === 'BUY' ? '🟢' : '🔴'} ${bias} | ${scoreResult.grade} | ${scoreResult.expectedWinRate}% WR expected`);
     if (atSupport.atLevel) reasons.push(`📍 ${atSupport.strength} SUPPORT at ${atSupport.level.toFixed(assetConfig.digits)} (quality: ${atSupport.quality || 100})`);
     if (atResistance.atLevel) reasons.push(`📍 ${atResistance.strength} RESISTANCE at ${atResistance.level.toFixed(assetConfig.digits)} (quality: ${atResistance.quality || 100})`);
     if (bos) reasons.push(`📈 BOS at ${bos.level.toFixed(assetConfig.digits)}`);
     if (retraced) reasons.push(`✅ Retracement to FVG/OB`);
-    if (sweep) reasons.push(`💧 Liquidity sweep confirmed`);
+    if (sweepResult.detected) reasons.push(`💧 Liquidity sweep confirmed (${sweepResult.direction})`);
     if (mss.detected) reasons.push(`🔄 MSS confirmed`);
     if (candlePattern.detected) reasons.push(`🕯️ ${candlePattern.pattern}`);
     if (fvg) reasons.push(`📊 FVG: ${fvg.level.toFixed(assetConfig.digits)} → ${fvg.level2.toFixed(assetConfig.digits)}`);
@@ -697,11 +747,12 @@ function analyzeSignal(prices, candles, assetConfig) {
     if (threeDrive) reasons.push(`🔄 Three-Drive pattern (+20)`);
     if (headShoulders) reasons.push(`👤 Head & Shoulders pattern (+25)`);
     if (scoreResult.positionMultiplier < 1.0 && scoreResult.positionMultiplier > 0) reasons.push(`⚠️ Position size: ${Math.round(scoreResult.positionMultiplier * 100)}% of calculated`);
+    
     let confidence = Math.min(85, 50 + Math.floor(scoreResult.score / 2.5));
     return { bias, confidence, grade: scoreResult.grade, expectedWinRate: scoreResult.expectedWinRate, positionMultiplier: scoreResult.positionMultiplier, reasons, currentPrice: curPrice };
 }
 
-// ========== 9AM KILLZONE (stricter, unchanged) ==========
+// ========== 9AM KILLZONE (unchanged) ==========
 function get8amRange(candles) {
     for (let i = candles.length - 1; i >= 0; i--) {
         const date = new Date(candles[i].timestamp);
@@ -875,9 +926,9 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
     } catch (err) { console.error(`✗ ${displayName}: ${err.message}`); }
 }
 async function main() {
-    console.log('--- OMNI-SIGNAL v9.0 (Added Double Sweep, Trendline, Scaled RSI, Three-Drive, Head & Shoulders) ---');
+    console.log('--- OMNI-SIGNAL v9.1 (Directional alignment: sweep + FVG/OB must match trade direction) ---');
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
-    console.log(`Rules: BOS + key level + retracement + sweep | minor quality≥70 | RR 1.6-3.0 | + pattern bonuses`);
+    console.log(`Rules: BOS + key level + retracement + sweep | directional alignment enforced | pattern bonuses`);
     let eurusd, gbpusd, usdjpy, usdcad, usdchf, usdsek;
     try {
         eurusd = await fetchForexPrice('EUR', 'USD');
