@@ -1,4 +1,4 @@
-// fetch-prices.js – v9.1 (Added directional alignment: sweep + FVG/OB must match trade direction)
+// fetch-prices.js – v10.1 (Persistent Session High/Low Strategy)
 
 const fs = require('fs');
 const path = require('path');
@@ -15,7 +15,27 @@ const DEFAULT_RISK_PERCENT = 1.0;
 const DEFAULT_MODE = 'scalp';
 
 const COOLDOWN_FILE = path.join(dataDir, 'cooldown.json');
+const DAILY_HL_FILE = path.join(dataDir, 'daily_highs_lows.json');  // NEW: Persistent storage
 let oilRunCounter = 0;
+
+// ========== SESSION HIGH/LOW CONFIGURATION ==========
+const SESSION_CONFIG = {
+    trackSessions: ['LONDON', 'NEW_YORK'],
+    minRangePips: {
+        forex: 15,
+        crypto: 100,
+        commodities: 20
+    },
+    proximityThreshold: 0.15,
+    requireSweepConfirmation: true,
+    tradingHours: {
+        start: 12,
+        end: 16
+    },
+    // NEW: Use yesterday's H/L if today's range is too small
+    useYesterdayIfSmallRange: true,
+    minRangeToTrade: 10  // minimum pips for forex
+};
 
 const ASSET_CONFIGS = {
     eurusd: { multiplier: 10000, spread: 0.00016, digits: 5, class: 'forex', minStopPips: 15, maxStopPips: 30, atrMultiplier: 0.6, maxLot: 5.0, tpMultiplier: 2.0 },
@@ -138,7 +158,308 @@ function getCurrentSession() {
     return 'OFF_HOURS';
 }
 
-// ========== KEY LEVELS (unchanged, minor quality ≥70) ==========
+// ========== NEW: PERSISTENT DAILY HIGH/LOW STORAGE ==========
+function updateDailyHighLow(symbol, price, timestamp) {
+    let dailyData = {};
+    if (fs.existsSync(DAILY_HL_FILE)) {
+        try { dailyData = JSON.parse(fs.readFileSync(DAILY_HL_FILE)); } catch(e) {}
+    }
+    
+    const date = new Date(timestamp);
+    const dateStr = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+    
+    if (!dailyData[symbol]) {
+        dailyData[symbol] = {};
+    }
+    
+    if (!dailyData[symbol][dateStr]) {
+        dailyData[symbol][dateStr] = { 
+            high: price, 
+            low: price, 
+            updated: timestamp,
+            open: price,
+            close: null
+        };
+    } else {
+        if (price > dailyData[symbol][dateStr].high) dailyData[symbol][dateStr].high = price;
+        if (price < dailyData[symbol][dateStr].low) dailyData[symbol][dateStr].low = price;
+        dailyData[symbol][dateStr].updated = timestamp;
+        dailyData[symbol][dateStr].close = price;
+    }
+    
+    // Keep last 30 days only
+    const dates = Object.keys(dailyData[symbol]).sort();
+    while (dates.length > 30) {
+        delete dailyData[symbol][dates.shift()];
+    }
+    
+    fs.writeFileSync(DAILY_HL_FILE, JSON.stringify(dailyData, null, 2));
+}
+
+function getDailyHighLow(symbol) {
+    if (!fs.existsSync(DAILY_HL_FILE)) return null;
+    
+    try {
+        const dailyData = JSON.parse(fs.readFileSync(DAILY_HL_FILE));
+        const now = new Date();
+        const todayStr = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`;
+        
+        if (!dailyData[symbol] || !dailyData[symbol][todayStr]) return null;
+        
+        const today = dailyData[symbol][todayStr];
+        return {
+            high: today.high,
+            low: today.low,
+            range: today.high - today.low,
+            open: today.open,
+            close: today.close
+        };
+    } catch(e) {
+        return null;
+    }
+}
+
+function getYesterdayHighLow(symbol) {
+    if (!fs.existsSync(DAILY_HL_FILE)) return null;
+    
+    try {
+        const dailyData = JSON.parse(fs.readFileSync(DAILY_HL_FILE));
+        const now = new Date();
+        const yesterday = new Date(now);
+        yesterday.setUTCDate(now.getUTCDate() - 1);
+        const yesterdayStr = `${yesterday.getUTCFullYear()}-${String(yesterday.getUTCMonth() + 1).padStart(2, '0')}-${String(yesterday.getUTCDate()).padStart(2, '0')}`;
+        
+        if (!dailyData[symbol] || !dailyData[symbol][yesterdayStr]) return null;
+        
+        const yesterdayData = dailyData[symbol][yesterdayStr];
+        return {
+            high: yesterdayData.high,
+            low: yesterdayData.low,
+            range: yesterdayData.high - yesterdayData.low,
+            isYesterday: true
+        };
+    } catch(e) {
+        return null;
+    }
+}
+
+function isWithinTradingHours() {
+    const now = new Date();
+    const utcHour = now.getUTCHours();
+    return utcHour >= SESSION_CONFIG.tradingHours.start && utcHour < SESSION_CONFIG.tradingHours.end;
+}
+
+function isPriceNearLevel(price, level, range) {
+    if (!range || range === 0) return false;
+    const threshold = range * SESSION_CONFIG.proximityThreshold;
+    return Math.abs(price - level) <= threshold;
+}
+
+function detectSweepOfLevel(candles, level, bias, lookback = 8) {
+    if (candles.length < lookback) return { detected: false, direction: null };
+    
+    const recentCandles = candles.slice(-lookback);
+    
+    for (const candle of recentCandles) {
+        if (bias === 'BUY') {
+            // Bullish sweep: price went below level, closed above it with bullish candle
+            if (candle.low < level && candle.close > level && candle.close > candle.open) {
+                return { detected: true, direction: 'BULLISH', candle: candle };
+            }
+        } else if (bias === 'SELL') {
+            // Bearish sweep: price went above level, closed below it with bearish candle
+            if (candle.high > level && candle.close < level && candle.close < candle.open) {
+                return { detected: true, direction: 'BEARISH', candle: candle };
+            }
+        }
+    }
+    
+    return { detected: false, direction: null };
+}
+
+function checkRangeReversalPattern(candles, level, bias) {
+    if (candles.length < 3) return false;
+    
+    const lastThree = candles.slice(-3);
+    
+    if (bias === 'BUY') {
+        const sweepCandle = lastThree.find(c => c.low < level && c.close > c.open);
+        const afterSweep = lastThree.slice(lastThree.indexOf(sweepCandle) + 1);
+        if (sweepCandle && afterSweep.length > 0) {
+            return afterSweep.some(c => c.close > sweepCandle.high);
+        }
+    } else if (bias === 'SELL') {
+        const sweepCandle = lastThree.find(c => c.high > level && c.close < c.open);
+        const afterSweep = lastThree.slice(lastThree.indexOf(sweepCandle) + 1);
+        if (sweepCandle && afterSweep.length > 0) {
+            return afterSweep.some(c => c.close < sweepCandle.low);
+        }
+    }
+    
+    return false;
+}
+
+// ========== NEW: SESSION HIGH/LOW STRATEGY SIGNAL (with persistent storage) ==========
+function analyzeSessionHighLowStrategy(candles, assetConfig, currentPrice, symbol) {
+    // 1. Check if within trading hours
+    if (!isWithinTradingHours()) {
+        return { bias: 'WAIT', grade: 'REJECT', reasons: ['⏸️ Outside trading hours (12:00-16:00 UTC)'] };
+    }
+    
+    // 2. Get today's H/L from persistent storage
+    let dailyHL = getDailyHighLow(symbol);
+    let usingYesterday = false;
+    
+    // 3. If today's data is insufficient, try yesterday's
+    if (!dailyHL || dailyHL.range === 0) {
+        if (SESSION_CONFIG.useYesterdayIfSmallRange) {
+            const yesterdayHL = getYesterdayHighLow(symbol);
+            if (yesterdayHL && yesterdayHL.range > 0) {
+                dailyHL = yesterdayHL;
+                usingYesterday = true;
+                console.log(`⚠️ ${symbol}: Using yesterday's H/L (today's data insufficient)`);
+            }
+        }
+    }
+    
+    if (!dailyHL || dailyHL.range === 0) {
+        return { bias: 'WAIT', grade: 'REJECT', reasons: ['⏸️ No daily H/L data available'] };
+    }
+    
+    // 4. Check minimum range requirement
+    const rangeInPips = dailyHL.range * assetConfig.multiplier;
+    const minRange = SESSION_CONFIG.minRangePips[assetConfig.class] || 10;
+    
+    if (rangeInPips < minRange) {
+        return { bias: 'WAIT', grade: 'REJECT', reasons: [`⏸️ Range too small (${rangeInPips.toFixed(1)} < ${minRange} pips)`] };
+    }
+    
+    // 5. Determine if price is near High or Low
+    const nearHigh = isPriceNearLevel(currentPrice, dailyHL.high, dailyHL.range);
+    const nearLow = isPriceNearLevel(currentPrice, dailyHL.low, dailyHL.range);
+    
+    if (!nearHigh && !nearLow) {
+        return { bias: 'WAIT', grade: 'REJECT', reasons: ['⏸️ Price not near session H/L'] };
+    }
+    
+    // 6. Determine bias and level
+    let bias = null;
+    let level = null;
+    let levelType = null;
+    
+    if (nearHigh) {
+        bias = 'SELL';
+        level = dailyHL.high;
+        levelType = 'RESISTANCE';
+    } else if (nearLow) {
+        bias = 'BUY';
+        level = dailyHL.low;
+        levelType = 'SUPPORT';
+    }
+    
+    // 7. Detect sweep confirmation
+    let sweepResult = { detected: false, direction: null };
+    if (SESSION_CONFIG.requireSweepConfirmation) {
+        sweepResult = detectSweepOfLevel(candles, level, bias, 10);
+        if (!sweepResult.detected) {
+            return { bias: 'WAIT', grade: 'REJECT', reasons: [`⏸️ No sweep confirmation at ${levelType}`] };
+        }
+        if ((bias === 'BUY' && sweepResult.direction !== 'BULLISH') ||
+            (bias === 'SELL' && sweepResult.direction !== 'BEARISH')) {
+            return { bias: 'WAIT', grade: 'REJECT', reasons: ['⏸️ Sweep direction does not match bias'] };
+        }
+    }
+    
+    // 8. Check for reversal pattern
+    const hasReversalPattern = checkRangeReversalPattern(candles, level, bias);
+    
+    // 9. Calculate signal strength
+    let score = 70;
+    let expectedWinRate = 65;
+    let grade = 'B+';
+    let reasons = [];
+    
+    reasons.push(`${bias === 'BUY' ? '🟢' : '🔴'} ${bias} | Session H/L Strategy${usingYesterday ? ' (using yesterday\'s levels)' : ''}`);
+    reasons.push(`📊 ${usingYesterday ? 'Yesterday\'s' : 'Today\'s'} range: ${dailyHL.high.toFixed(assetConfig.digits)} / ${dailyHL.low.toFixed(assetConfig.digits)} (${rangeInPips.toFixed(1)} pips)`);
+    reasons.push(`📍 Trading near session ${levelType} at ${level.toFixed(assetConfig.digits)}`);
+    
+    if (sweepResult.detected) {
+        score += 15;
+        expectedWinRate += 8;
+        reasons.push(`💧 Liquidity sweep confirmed at ${levelType}`);
+    }
+    
+    if (hasReversalPattern) {
+        score += 10;
+        expectedWinRate += 5;
+        reasons.push(`🕯️ Reversal pattern confirmed`);
+    }
+    
+    // Count how many times level was tested (from candle data)
+    let touchCount = 0;
+    const recentCandles = candles.slice(-50);
+    for (const c of recentCandles) {
+        if (Math.abs(c.high - level) / level < 0.0003) touchCount++;
+        if (Math.abs(c.low - level) / level < 0.0003) touchCount++;
+    }
+    
+    if (touchCount >= 3) {
+        score += 10;
+        expectedWinRate += 5;
+        reasons.push(`🔁 Level tested ${touchCount} times (strong S/R)`);
+    }
+    
+    // Determine grade
+    if (expectedWinRate >= 75) grade = 'A';
+    else if (expectedWinRate >= 70) grade = 'A-';
+    else if (expectedWinRate >= 65) grade = 'B+';
+    else grade = 'B';
+    
+    score = Math.min(100, score);
+    expectedWinRate = Math.min(85, expectedWinRate);
+    
+    // 10. Set stop loss (just beyond H/L)
+    const buffer = dailyHL.range * 0.05;
+    const stopLoss = bias === 'BUY' 
+        ? level - buffer
+        : level + buffer;
+    
+    // 11. Set take profit (mid-range or 1.5x risk)
+    const midRange = (dailyHL.high + dailyHL.low) / 2;
+    const risk = Math.abs(currentPrice - stopLoss);
+    const minRR = 1.5;
+    
+    let takeProfit;
+    if (bias === 'BUY') {
+        const potentialTP = Math.max(midRange, currentPrice + (risk * minRR));
+        takeProfit = potentialTP;
+    } else {
+        const potentialTP = Math.min(midRange, currentPrice - (risk * minRR));
+        takeProfit = potentialTP;
+    }
+    
+    const rrRatio = Math.abs(takeProfit - currentPrice) / risk;
+    
+    return {
+        bias,
+        grade,
+        expectedWinRate,
+        positionMultiplier: 1.0,
+        entry: currentPrice,
+        stopLoss,
+        takeProfit,
+        rrRatio: rrRatio.toFixed(1),
+        strategy: 'SessionHL',
+        reasons,
+        currentPrice,
+        level,
+        levelType,
+        dailyHL,
+        usingYesterday
+    };
+}
+
+// ========== INSTITUTIONAL FOOTPRINTS (Keeping all existing code) ==========
 function getKeyLevels(candles, currentPrice) {
     const levels = [];
     const dayCandles = candles.slice(-288);
@@ -217,8 +538,6 @@ function isAtResistance(price, levels) {
     }
     return { atLevel: false };
 }
-
-// ========== INSTITUTIONAL FOOTPRINTS ==========
 function detectBOS(candles) {
     if (candles.length < 50) return null;
     const highs = candles.map(c => c.high);
@@ -267,11 +586,9 @@ function detectLiquiditySweep(candles, level, bias) {
     if (candles.length < 5) return { detected: false, direction: null };
     const recent = candles.slice(-5);
     for (const c of recent) {
-        // Bullish sweep: price swept below level, closed above it
         if (c.low < level && c.close > level && c.close > c.open) {
             return { detected: true, direction: 'BULLISH' };
         }
-        // Bearish sweep: price swept above level, closed below it
         if (c.high > level && c.close < level && c.close < c.open) {
             return { detected: true, direction: 'BEARISH' };
         }
@@ -323,9 +640,6 @@ function detectCandlePattern(candles, bias) {
     }
     return { detected: false, pattern: null };
 }
-
-// ========== NEW PATTERN DETECTIONS ==========
-
 function detectDoubleSweep(candles) {
     if (candles.length < 30) return false;
     const recentHighs = [];
@@ -343,7 +657,6 @@ function detectDoubleSweep(candles) {
     }
     return sweepCount >= 2;
 }
-
 function detectTrendlineBreakRetest(candles) {
     if (candles.length < 20) return { detected: false, direction: null };
     const swingPoints = [];
@@ -369,7 +682,6 @@ function detectTrendlineBreakRetest(candles) {
     }
     return { detected: false, direction: null };
 }
-
 function detectScaledRSIDivergence(prices, rsi) {
     if (prices.length < 20) return { direction: null, strength: 0 };
     const recentPrices = prices.slice(-20);
@@ -401,7 +713,6 @@ function detectScaledRSIDivergence(prices, rsi) {
     }
     return { direction, strength };
 }
-
 function detectThreeDrive(candles) {
     if (candles.length < 30) return { detected: false, direction: null };
     const swingPoints = [];
@@ -432,7 +743,6 @@ function detectThreeDrive(candles) {
     }
     return { detected: false, direction: null };
 }
-
 function detectHeadAndShoulders(candles) {
     if (candles.length < 30) return { detected: false, direction: null, neckline: null };
     const swingPoints = [];
@@ -478,7 +788,7 @@ function detectHeadAndShoulders(candles) {
     return { detected: false, direction: null, neckline: null };
 }
 
-// ========== SCORING SYSTEM (with directional alignment) ==========
+// ========== SCORING SYSTEM (Keeping original) ==========
 function calculateSignalScore(factors) {
     const { hasBOS, hasKeyLevel, retraced, sweepDetected, sweepDirection, levelStrength, levelQuality, mss, candlePattern, fvg, ob, sessionBoost,
             doubleSweep, trendlineBreak, scaledRSIStrength, threeDrive, headShoulders, tradeDirection } = factors;
@@ -486,19 +796,15 @@ function calculateSignalScore(factors) {
     if (!hasBOS || !hasKeyLevel) return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
     if (!retraced) return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35 };
     
-    // DIRECTIONAL ALIGNMENT CHECKS (NEW)
-    // Sweep direction must match trade direction
     if (sweepDetected && sweepDirection !== tradeDirection) {
         return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35, reason: 'Sweep direction opposes trade' };
     }
-    // FVG/OB direction must match trade direction
     if (fvg && fvg.type !== tradeDirection) {
         return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35, reason: 'FVG direction opposes trade' };
     }
     if (ob && ob.type !== tradeDirection) {
         return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35, reason: 'OB direction opposes trade' };
     }
-    // BOS direction must match trade direction
     if (hasBOS && factors.bosDirection !== tradeDirection) {
         return { passed: false, grade: 'REJECT', positionMultiplier: 0, expectedWinRate: 35, reason: 'BOS direction opposes trade' };
     }
@@ -524,7 +830,6 @@ function calculateSignalScore(factors) {
     if (candlePattern && candlePattern.detected) { score += 10; expectedWinRate = Math.min(85, expectedWinRate + 4); }
     if (sessionBoost && (levelStrength === 'MAJOR' || levelQuality >= 75)) { score += 5; expectedWinRate = Math.min(85, expectedWinRate + 2); }
 
-    // NEW PATTERN BONUSES
     if (doubleSweep) { score += 15; expectedWinRate = Math.min(85, expectedWinRate + 5); }
     if (trendlineBreak) { score += 12; expectedWinRate = Math.min(85, expectedWinRate + 4); }
     if (scaledRSIStrength === 85) { score += 10; expectedWinRate = Math.min(85, expectedWinRate + 5); }
@@ -543,7 +848,7 @@ function calculateSignalScore(factors) {
     return { score, grade, passed, positionMultiplier, expectedWinRate };
 }
 
-// ========== RISK MANAGEMENT (unchanged) ==========
+// ========== RISK MANAGEMENT ==========
 function findLogicalStopLoss(candles, currentPrice, bias, assetConfig) {
     const { minStopPips, maxStopPips, atrMultiplier, spread } = assetConfig;
     let atrStop = minStopPips;
@@ -646,7 +951,7 @@ function calculateTradeLevels(price, bias, assetConfig, candles, positionMultipl
     const { takeProfit, rr, isExtended } = findLogicalTakeProfit(entry, stopLoss, bias, assetConfig, candles);
     if (parseFloat(rr) < 1.6) return null;
     const riskAmount = DEFAULT_BALANCE * (DEFAULT_RISK_PERCENT / 100);
-    const stopDistPoints = Math.abs(entry - stopLoss) + assetConfig.spread;
+    const stopDistPoints = Math.abs(entry - stopLoss) * assetConfig.multiplier + assetConfig.spread;
     let lotSize = riskAmount / (stopDistPoints * assetConfig.multiplier);
     lotSize = Math.floor(lotSize * 1000) / 1000;
     lotSize = Math.max(0.01, Math.min(lotSize, assetConfig.maxLot));
@@ -655,10 +960,21 @@ function calculateTradeLevels(price, bias, assetConfig, candles, positionMultipl
     return { entry: entry.toFixed(assetConfig.digits), sl: stopLoss.toFixed(assetConfig.digits), tp: takeProfit.toFixed(assetConfig.digits), rrRatio: rr, lotSize: lotSize.toFixed(2), isExtendedRR: isExtended };
 }
 
-// ========== MAIN SIGNAL ANALYSIS (with directional alignment) ==========
-function analyzeSignal(prices, candles, assetConfig) {
+// ========== MAIN SIGNAL ANALYSIS (with persistent Session H/L priority) ==========
+function analyzeSignal(prices, candles, assetConfig, symbol) {
     if (candles.length < 50) return { bias: 'WAIT', confidence: 30, currentPrice: prices[prices.length-1] };
     const curPrice = prices[prices.length-1];
+    
+    // PRIORITY 1: Session High/Low Strategy (Only during 12-16 UTC)
+    if (isWithinTradingHours()) {
+        const sessionHLSignal = analyzeSessionHighLowStrategy(candles, assetConfig, curPrice, symbol);
+        if (sessionHLSignal && sessionHLSignal.bias !== 'WAIT') {
+            console.log(`🎯 Session H/L signal detected for ${symbol}`);
+            return sessionHLSignal;
+        }
+    }
+    
+    // PRIORITY 2: Original Institutional Footprint Strategy
     const keyLevels = getKeyLevels(candles, curPrice);
     const atSupport = isAtSupport(curPrice, keyLevels);
     const atResistance = isAtResistance(curPrice, keyLevels);
@@ -695,12 +1011,10 @@ function analyzeSignal(prices, candles, assetConfig) {
     }
     if (!bias) return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['⏸️ No clear level'] };
     
-    // If sweep required but not detected
     if (!sweepResult.detected) {
         return { bias: 'WAIT', grade: 'REJECT', currentPrice: curPrice, reasons: ['⏸️ No liquidity sweep'] };
     }
     
-    // DETECT NEW PATTERNS
     const doubleSweep = detectDoubleSweep(candles);
     const trendlineBreak = detectTrendlineBreakRetest(candles).detected;
     const scaledRSI = detectScaledRSIDivergence(prices.map(c => c.close), prices.map(c => c.rsi || 50));
@@ -806,7 +1120,7 @@ function analyze9amStrategy(candles, assetConfig, currentPrice) {
     const risk = Math.abs(currentPrice - stopLoss);
     const { takeProfit, rr, isExtended } = findLogicalTakeProfit(currentPrice, stopLoss, falseBreak.bias, assetConfig, candles);
     const riskAmount = DEFAULT_BALANCE * (DEFAULT_RISK_PERCENT / 100);
-    const stopDistPoints = Math.abs(currentPrice - stopLoss) + assetConfig.spread;
+    const stopDistPoints = Math.abs(currentPrice - stopLoss) * assetConfig.multiplier + assetConfig.spread;
     let lotSize = riskAmount / (stopDistPoints * assetConfig.multiplier);
     lotSize = Math.floor(lotSize * 1000) / 1000;
     lotSize = Math.max(0.01, Math.min(lotSize, assetConfig.maxLot));
@@ -821,6 +1135,14 @@ async function sendTelegramAlert(symbolDisplay, signal, tradeLevels, assetConfig
     const timestamp = new Date().toLocaleString();
     const rrDisplay = tradeLevels.isExtendedRR ? `1:${tradeLevels.rrRatio} 🚀 EXTENDED` : `1:${tradeLevels.rrRatio}`;
     const strategyTag = signal.strategy ? ` [${signal.strategy}]` : '';
+    
+    let rangeInfo = '';
+    if (signal.strategy === 'SessionHL' && signal.dailyHL) {
+        const rangePips = (signal.dailyHL.range * assetConfig.multiplier).toFixed(1);
+        const yesterdayNote = signal.usingYesterday ? ' (using yesterday\'s levels)' : '';
+        rangeInfo = `\n📐 ${signal.usingYesterday ? 'Yesterday\'s' : 'Today\'s'} Range: ${rangePips} pips${yesterdayNote}\n📍 Level: ${signal.levelType} at ${signal.level.toFixed(assetConfig.digits)}`;
+    }
+    
     const message = `
 🤖 OMNI-SIGNAL ALERT${strategyTag} 🤖
 ━━━━━━━━━━━━━━━━━━━
@@ -828,7 +1150,7 @@ ${signal.bias === 'BUY' ? '🟢 BUY' : '🔴 SELL'} | ${signal.grade} (${signal.
 ⏰ ${timestamp} (${session})
 
 📊 ${symbolDisplay}
-💰 Price: ${signal.currentPrice?.toFixed(assetConfig.digits) || signal.entry}
+💰 Price: ${(signal.currentPrice || signal.entry)?.toFixed(assetConfig.digits)}${rangeInfo}
 
 ━━━━━━━━━━━━━━━━━━━
 💡 ${signal.reasons.slice(0,6).join('\n')}
@@ -868,7 +1190,8 @@ function saveCandleToHistory(file, candle) {
     if (fs.existsSync(f)) try { data = JSON.parse(fs.readFileSync(f)); } catch(e) {}
     if (!data.candles) data.candles = [];
     data.candles.push(candle);
-    if (data.candles.length > 500) data.candles.shift();
+    // Keep more candles for better analysis
+    if (data.candles.length > 2000) data.candles.shift();  // Increased from 500 to 2000
     data.currentPrice = candle.close;
     data.timestamp = Date.now();
     data.high = Math.max(...data.candles.slice(-288).map(c => c.high));
@@ -886,6 +1209,10 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
         let price = await priceFetcher();
         if (!price) throw new Error('No price');
         const now = Date.now();
+        
+        // Update persistent daily High/Low storage
+        updateDailyHighLow(file, price, now);
+        
         const fiveMinMs = 5 * 60 * 1000;
         const bucketStart = Math.floor(now / fiveMinMs) * fiveMinMs;
         let state = loadCandleState(file);
@@ -908,7 +1235,7 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
         console.log(`✓ ${displayName}: price ${price}`);
         if (candles.length >= 50) {
             const prices = candles.map(c => c.close);
-            const existingSignal = analyzeSignal(prices, candles, assetConfig);
+            const existingSignal = analyzeSignal(prices, candles, assetConfig, file);
             const killzoneSignal = analyze9amStrategy(candles, assetConfig, price);
             let finalSignal = null;
             if (existingSignal.bias !== 'WAIT' && killzoneSignal) {
@@ -926,9 +1253,11 @@ async function processAsset(file, priceFetcher, displayName, assetConfig) {
     } catch (err) { console.error(`✗ ${displayName}: ${err.message}`); }
 }
 async function main() {
-    console.log('--- OMNI-SIGNAL v9.1 (Directional alignment: sweep + FVG/OB must match trade direction) ---');
+    console.log('--- OMNI-SIGNAL v10.1 (Persistent Session High/Low Strategy) ---');
+    console.log(`Session H/L active: ${SESSION_CONFIG.tradingHours.start}:00-${SESSION_CONFIG.tradingHours.end}:00 UTC`);
+    console.log(`Daily H/L data persisted to: ${DAILY_HL_FILE}`);
     console.log(`Telegram: ${!!TELEGRAM_BOT_TOKEN && !!TELEGRAM_CHAT_ID ? '✅' : '❌'}`);
-    console.log(`Rules: BOS + key level + retracement + sweep | directional alignment enforced | pattern bonuses`);
+    console.log(`Rules: Session H/L (priority during overlap) + sweep confirmation + persistent storage`);
     let eurusd, gbpusd, usdjpy, usdcad, usdchf, usdsek;
     try {
         eurusd = await fetchForexPrice('EUR', 'USD');
