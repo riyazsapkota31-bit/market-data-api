@@ -5,6 +5,11 @@ on:
     types: [cron-job]
   workflow_dispatch:
 
+# 🔥 ADD THESE 3 LINES HERE ↓
+concurrency:
+  group: market-data-fetch
+  cancel-in-progress: false
+
 jobs:
   fetch:
     runs-on: ubuntu-latest
