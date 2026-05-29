@@ -1,11 +1,11 @@
 {
-  "bucketStart": 1780021800000,
+  "bucketStart": 1780022100000,
   "candle": {
-    "open": 2000.24,
-    "high": 2001.98,
-    "low": 2000.24,
-    "close": 2001.98
+    "open": 2002.5,
+    "high": 2002.5,
+    "low": 2002.5,
+    "close": 2002.5
   },
-  "lastPrice": 2001.98,
-  "lastTimestamp": 1780022073551
+  "lastPrice": 2002.5,
+  "lastTimestamp": 1780022193970
 }
