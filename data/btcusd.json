@@ -7734,10 +7734,17 @@
       "high": 74212,
       "low": 74177,
       "close": 74177
+    },
+    {
+      "timestamp": 1780076700000,
+      "open": 74113,
+      "high": 74113,
+      "low": 74044,
+      "close": 74044
     }
   ],
-  "currentPrice": 74177,
-  "timestamp": 1780076791910,
+  "currentPrice": 74044,
+  "timestamp": 1780077045147,
   "high": 74212,
   "low": 72515,
   "change": 0.09956268037859026
